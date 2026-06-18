@@ -1,0 +1,55 @@
+{
+  "name": "rtk-token-savings",
+  "productName": "rtk Savings",
+  "version": "1.0.0",
+  "description": "Menu bar/tray app + dashboard tracking tokens saved by rtk",
+  "author": "pedrolacerda",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "stats": "node stats.js",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "me.pedrolacerda.rtksavings",
+    "productName": "rtk Savings",
+    "files": [
+      "main.js",
+      "preload.js",
+      "stats.js",
+      "renderer/**",
+      "build/*.png"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon.png"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ],
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Utility",
+      "icon": "build/icon.png"
+    }
+  },
+  "devDependencies": {
+    "electron": "^42.4.1",
+    "electron-builder": "^26.15.3"
+  }
+}

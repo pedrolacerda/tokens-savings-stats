@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>rtk Savings</title>
+<script src="chart.umd.min.js"></script>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--fg:#e6edf3;--muted:#8b949e;--accent:#2f81f7;--green:#3fb950}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+  header{padding:22px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  h1{font-size:19px;margin:0;display:flex;align-items:center;gap:8px}
+  h1 .bolt{color:var(--green)}
+  .sub{color:var(--muted);font-size:13px}
+  .spacer{flex:1}
+  select,input[type=date]{background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px}
+  .scopepick{position:relative}
+  .scopepick>summary{list-style:none}
+  .scopepick>summary::-webkit-details-marker{display:none}
+  .scopesum{display:inline-flex;align-items:center;gap:7px;cursor:pointer;background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-size:13px;user-select:none;transition:border-color .12s}
+  .scopesum:hover{border-color:#3d444d}
+  .scopepick[open]>.scopesum{border-color:var(--accent)}
+  .scopesum .sicon{width:15px;height:15px;color:var(--muted)}
+  .scopesum .caret{width:14px;height:14px;color:var(--muted);transition:transform .15s}
+  .scopepick[open] .caret{transform:rotate(180deg)}
+  .scopepick[open] .scopesum .sicon{color:var(--accent)}
+  .scopemenu{position:absolute;right:0;top:calc(100% + 8px);background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:6px;min-width:260px;max-height:360px;overflow:auto;z-index:20;box-shadow:0 12px 32px rgba(1,4,9,.6)}
+  .scopemenu::-webkit-scrollbar{width:9px}
+  .scopemenu::-webkit-scrollbar-thumb{background:#30363d;border-radius:6px;border:2px solid var(--panel)}
+  .scopehdr{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 9px 4px}
+  .scopemenu label{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:8px;font-size:13px;cursor:pointer;color:var(--fg);transition:background .1s}
+  .scopemenu label:hover{background:#1f2630}
+  .scopemenu label:has(input:checked){background:rgba(47,129,247,.14);color:#fff}
+  .scopemenu label input{appearance:none;-webkit-appearance:none;width:16px;height:16px;flex:0 0 auto;border:1.5px solid #46505c;border-radius:5px;background:#0d1117;position:relative;cursor:pointer;transition:all .1s}
+  .scopemenu label input:checked{background:var(--accent);border-color:var(--accent)}
+  .scopemenu label input:checked::after{content:"";position:absolute;left:4.5px;top:1.5px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .scopemenu label .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .scopemenu .clear{display:flex;align-items:center;gap:7px;width:100%;justify-content:flex-start;background:transparent;border:0;color:var(--accent);padding:7px 9px;margin:0;border-radius:8px;font-size:13px;cursor:pointer}
+  .scopemenu .clear:hover{background:#1f2630}
+  .scopemenu .divider{height:1px;background:var(--border);margin:5px 4px}
+  #range label{color:var(--muted);font-size:13px;display:inline-flex;align-items:center;gap:6px}
+  .wrap{max-width:1100px;margin:0 auto;padding:24px 28px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:26px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
+  .card .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .card .value{font-size:26px;font-weight:650;margin-top:6px}
+  .card .value.green{color:var(--green)}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:22px}
+  .panel h2{font-size:15px;margin:0 0 14px}
+  .controls{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+  .controls[hidden]{display:none}
+  .ctlrow{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+  .ctlrow .controls{margin-bottom:16px}
+  .seg{gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  .seg button{border:0;border-radius:0;padding:6px 12px}
+  .seg button+button{border-left:1px solid var(--border)}
+  button{background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:8px;padding:6px 13px;cursor:pointer;font-size:13px}
+  button.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  #refresh{display:inline-flex;align-items:center;gap:7px}
+  #refresh:hover{border-color:var(--accent);color:#fff}
+  #refresh .ico{display:inline-flex}
+  #refresh .ico svg{width:14px;height:14px;display:block}
+  #refresh:disabled{opacity:.7;cursor:default}
+  #refresh.loading .ico svg{animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .empty{color:var(--muted);text-align:center;padding:36px 0}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+  th{color:var(--muted);font-weight:500}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  td.cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;max-width:520px;overflow:hidden;text-overflow:ellipsis}
+  .pos{color:var(--green)} .zero{color:var(--muted)}
+  .foot{color:var(--muted);font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="bolt">⚡</span> rtk Savings</h1>
+  <span class="sub" id="meta">loading…</span>
+  <span class="spacer"></span>
+  <details class="scopepick" id="scope">
+    <summary class="scopesum">
+      <svg class="sicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <span id="scopeSummary">All projects</span>
+      <svg class="caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </summary>
+    <div class="scopemenu" id="scopeMenu"></div>
+  </details>
+  <button id="refresh"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></span><span class="lbl">Refresh</span></button>
+</header>
+<div class="wrap">
+  <div class="cards" id="cards"></div>
+
+  <div class="panel">
+    <h2>Tokens saved over time</h2>
+    <div class="ctlrow">
+      <div class="controls" id="buckets">
+        <button data-b="daily" class="active">daily</button>
+        <button data-b="weekly">weekly</button>
+        <button data-b="monthly">monthly</button>
+        <button data-b="custom">custom</button>
+      </div>
+      <div class="controls seg" id="tsmode">
+        <button data-m="total" class="active">total</button>
+        <button data-m="project">by project</button>
+      </div>
+    </div>
+    <div class="controls" id="range" hidden>
+      <label>from <input type="date" id="from"></label>
+      <label>to <input type="date" id="to"></label>
+    </div>
+    <div id="tsWrap"><canvas id="tsChart" height="110"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <h2>Top commands by tokens saved</h2>
+    <div id="cmdWrap"><canvas id="cmdChart" height="160"></canvas></div>
+  </div>
+
+  <div class="panel">
+    <h2>Recent activity</h2>
+    <div id="recent"></div>
+  </div>
+
+  <div class="foot">Manual refresh (↻ top-right, or on re-open) · source: rtk history.db</div>
+</div>
+
+<script>
+const fmt = n => (n||0).toLocaleString();
+const humanK = n => { n=n||0; if(n>=1e6) return (n/1e6).toFixed(1).replace(/\.0$/,"")+"M"; if(n>=1e3) return (n/1e3).toFixed(1).replace(/\.0$/,"")+"K"; return String(n); };
+const humanTime = ms => { const s=Math.round((ms||0)/1000); if(s<60) return s+"s"; const m=Math.floor(s/60); if(m<60) return m+"m"+(s%60)+"s"; const h=Math.floor(m/60); return h+"h"+(m%60)+"m"; };
+
+let bucket = "daily";
+let tsMode = "total";   // "total" | "project"
+let scopeSel = [];   // selected project paths; empty = all
+let lastProjects = null;
+let data = null;
+let tsChart = null, cmdChart = null;
+
+const $ = s => document.querySelector(s);
+
+function cards(s){
+  const items = [
+    ["Tokens saved", humanK(s.saved), true],
+    ["Savings", (s.pct||0).toFixed(1)+"%", true],
+    ["Commands optimized", fmt(s.commands), false],
+    ["Input tokens", humanK(s.input), false],
+    ["Output tokens", humanK(s.output), false],
+    ["Total exec time", humanTime(s.time_ms), false],
+  ];
+  $("#cards").innerHTML = items.map(([l,v,g])=>
+    `<div class="card"><div class="label">${l}</div><div class="value${g?' green':''}">${v}</div></div>`
+  ).join("");
+}
+
+const SPAN = { daily: "day", weekly: "week", monthly: "month", custom: "day" };
+const PALETTE = ["#2f81f7","#3fb950","#e3b341","#db61a2","#a371f7","#f0883e","#56d4dd","#f85149","#bc8cff","#39c5cf","#d29922","#7ee787"];
+
+function tsLabel(p){ return p; }
+function projName(p){ return p ? (p.replace(/^.*\//,"")||p) : "(no project)"; }
+function ensureCanvas(){ if(!$("#tsChart")) $("#tsWrap").innerHTML = '<canvas id="tsChart" height="110"></canvas>'; }
+
+// custom: filter the daily series to the [from, to] inputs (inclusive).
+function tsSeries(){
+  if(bucket !== "custom") return (data.series && data.series[bucket]) || [];
+  const daily = (data.series && data.series.daily) || [];
+  const from = $("#from").value, to = $("#to").value;
+  return daily.filter(p => (!from || p.period >= from) && (!to || p.period <= to));
+}
+
+// per-project rows for the active bucket (custom falls back to daily, range-filtered).
+function stackRows(){
+  const key = bucket === "custom" ? "daily" : bucket;
+  let rows = (data.stacked && data.stacked[key]) || [];
+  if(bucket === "custom"){
+    const from = $("#from").value, to = $("#to").value;
+    rows = rows.filter(r => (!from || r.period >= from) && (!to || r.period <= to));
+  }
+  return rows;
+}
+
+function buildStacked(){
+  const rows = stackRows();
+  const periods = [...new Set(rows.map(r=>r.period))].sort();
+  const idx = Object.fromEntries(periods.map((p,i)=>[p,i]));
+  const byProj = new Map();
+  rows.forEach(r=>{
+    if(!byProj.has(r.project)) byProj.set(r.project, new Array(periods.length).fill(0));
+    byProj.get(r.project)[idx[r.period]] += r.saved||0;
+  });
+  const ordered = [...byProj.entries()]
+    .map(([pr,arr])=>({pr,arr,total:arr.reduce((a,b)=>a+b,0)}))
+    .sort((a,b)=>b.total-a.total);
+  const datasets = ordered.map((o,i)=>({
+    label: projName(o.pr),
+    data: o.arr,
+    backgroundColor: PALETTE[i % PALETTE.length],
+    borderRadius: 3,
+    stack: "s",
+  }));
+  return { periods, datasets };
+}
+
+function drawTs(){
+  if(tsChart){ tsChart.destroy(); tsChart=null; }
+  if(tsMode === "project") return drawTsProject();
+  const series = tsSeries();
+  if(!series.length){ $("#tsWrap").innerHTML = '<div class="empty">No history in range.</div>'; return; }
+  ensureCanvas();
+  let cum=0; const cumData = series.map(p=> (cum += p.saved||0));
+  tsChart = new Chart($("#tsChart"), {
+    data:{ labels: series.map(p=>tsLabel(p.period)), datasets:[
+      {type:"bar",label:"Saved this "+SPAN[bucket],data:series.map(p=>p.saved||0),backgroundColor:"#2f81f7cc",borderRadius:4,yAxisID:"y"},
+      {type:"line",label:"Cumulative",data:cumData,borderColor:"#3fb950",backgroundColor:"#3fb950",tension:.3,pointRadius:2,yAxisID:"y1"},
+    ]},
+    options:{responsive:true,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:"#e6edf3"}},tooltip:{callbacks:{label:c=>c.dataset.label+": "+fmt(c.parsed.y)}}},
+      scales:{
+        x:{ticks:{color:"#8b949e",maxRotation:0,autoSkip:true},grid:{color:"#21262d"}},
+        y:{position:"left",title:{display:true,text:"Saved per "+SPAN[bucket],color:"#2f81f7"},ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+        y1:{position:"right",title:{display:true,text:"Cumulative saved",color:"#3fb950"},ticks:{color:"#8b949e",callback:humanK},grid:{drawOnChartArea:false}},
+      }}});
+}
+
+function drawTsProject(){
+  const { periods, datasets } = buildStacked();
+  if(!periods.length){ $("#tsWrap").innerHTML = '<div class="empty">No history in range.</div>'; return; }
+  ensureCanvas();
+  tsChart = new Chart($("#tsChart"), {
+    type:"bar",
+    data:{ labels: periods, datasets },
+    options:{responsive:true,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:"#e6edf3",boxWidth:12,padding:10}},
+        tooltip:{callbacks:{label:c=>c.dataset.label+": "+fmt(c.parsed.y)}}},
+      scales:{
+        x:{stacked:true,ticks:{color:"#8b949e",maxRotation:0,autoSkip:true},grid:{color:"#21262d"}},
+        y:{stacked:true,title:{display:true,text:"Saved per "+SPAN[bucket]+" (by project)",color:"#8b949e"},ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+      }}});
+}
+
+function drawCmd(){
+  const rows = (data.byCommand||[]);
+  if(cmdChart){ cmdChart.destroy(); cmdChart=null; }
+  if(!rows.length){ $("#cmdWrap").innerHTML = '<div class="empty">No commands yet.</div>'; return; }
+  if(!$("#cmdChart")){ $("#cmdWrap").innerHTML = '<canvas id="cmdChart" height="160"></canvas>'; }
+  cmdChart = new Chart($("#cmdChart"), {
+    type:"bar",
+    data:{ labels: rows.map(r=>r.command), datasets:[
+      {label:"Tokens saved",data:rows.map(r=>r.saved),backgroundColor:"#3fb950cc",borderRadius:4}
+    ]},
+    options:{indexAxis:"y",responsive:true,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{const r=rows[c.dataIndex]; return fmt(r.saved)+" saved · "+r.n+" runs";}}}},
+      scales:{
+        x:{ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+        y:{ticks:{color:"#8b949e"},grid:{display:false}},
+      }}});
+}
+
+function drawRecent(){
+  const rows = (data.recent||[]);
+  if(!rows.length){ $("#recent").innerHTML = '<div class="empty">No activity yet.</div>'; return; }
+  const body = rows.map(r=>{
+    const t = new Date(r.timestamp);
+    const when = isNaN(t) ? r.timestamp : t.toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+    const saved = r.saved_tokens||0;
+    const cls = saved>0 ? "pos" : "zero";
+    return `<tr><td>${when}</td><td class="cmd">${escapeHtml(r.rtk_cmd)}</td><td class="num ${cls}">${saved>0?'+'+fmt(saved):'0'}</td><td class="num ${cls}">${(r.savings_pct||0).toFixed(0)}%</td></tr>`;
+  }).join("");
+  $("#recent").innerHTML = `<table><thead><tr><th>When</th><th>Command</th><th class="num">Saved</th><th class="num">%</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function fillScope(){
+  const projs = data.projects||[];
+  const key = projs.join("\n");
+  if(key !== lastProjects){ // rebuild menu only when the project set changes
+    lastProjects = key;
+    const rows = projs.map(p=>{
+      const checked = scopeSel.includes(p) ? "checked" : "";
+      const name = p.replace(/^.*\//,"") || p;
+      return `<label title="${escapeHtml(p)}"><input type="checkbox" value="${escapeHtml(p)}" ${checked}><span class="nm">${escapeHtml(name)}</span></label>`;
+    }).join("");
+    $("#scopeMenu").innerHTML =
+      '<div class="scopehdr">Filter by project</div>' +
+      '<button class="clear" id="scopeClear">' +
+        '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>' +
+        'Show all projects</button>' +
+      '<div class="divider"></div>' +
+      (rows || '<div class="empty" style="padding:10px">No projects</div>');
+  }
+  updateScopeSummary();
+}
+
+function updateScopeSummary(){
+  const n = scopeSel.length;
+  $("#scopeSummary").textContent =
+    n===0 ? "All projects" :
+    n===1 ? (scopeSel[0].replace(/^.*\//,"")||scopeSel[0]) : (n+" projects");
+}
+
+function render(){
+  const s = data.summary||{};
+  cards(s);
+  fillScope();
+  drawTs();
+  drawCmd();
+  drawRecent();
+  const since = s.since ? new Date(s.since) : null;
+  $("#meta").textContent =
+    (data.available ? "" : "rtk history.db not found · ") +
+    (since && !isNaN(since) ? "since "+since.toLocaleDateString([], {month:"short",day:"numeric",year:"numeric"})+" · " : "") +
+    fmt(s.commands)+" commands · updated "+new Date().toLocaleTimeString();
+}
+
+async function load(){
+  try{
+    data = await window.rtk.getStats({ projectPaths: scopeSel });
+    render();
+  }catch(e){ $("#meta").textContent = "error: "+e.message; }
+}
+
+function initRangeDefaults(){
+  const daily = (data && data.series && data.series.daily) || [];
+  if(!daily.length) return;
+  if(!$("#from").value) $("#from").value = daily[0].period;
+  if(!$("#to").value) $("#to").value = daily[daily.length-1].period;
+}
+
+$("#buckets").addEventListener("click", e=>{
+  const b = e.target.getAttribute("data-b"); if(!b) return;
+  bucket = b;
+  [...$("#buckets").children].forEach(x=>x.classList.toggle("active", x.getAttribute("data-b")===b));
+  const custom = b === "custom";
+  $("#range").hidden = !custom;
+  if(custom) initRangeDefaults();
+  drawTs();
+});
+$("#range").addEventListener("change", drawTs);
+
+$("#tsmode").addEventListener("click", e=>{
+  const m = e.target.getAttribute("data-m"); if(!m) return;
+  tsMode = m;
+  [...$("#tsmode").children].forEach(x=>x.classList.toggle("active", x.getAttribute("data-m")===m));
+  drawTs();
+});
+
+$("#scopeMenu").addEventListener("click", e=>{
+  if(e.target.closest("#scopeClear")){
+    scopeSel = [];
+    $("#scopeMenu").querySelectorAll("input[type=checkbox]").forEach(c=>c.checked=false);
+    updateScopeSummary();
+    load();
+  }
+});
+$("#scopeMenu").addEventListener("change", e=>{
+  if(e.target.type !== "checkbox") return;
+  const v = e.target.value;
+  if(e.target.checked){ if(!scopeSel.includes(v)) scopeSel.push(v); }
+  else { scopeSel = scopeSel.filter(x=>x!==v); }
+  updateScopeSummary();
+  load();
+});
+
+async function doRefresh(){
+  const b = $("#refresh");
+  if(b.disabled) return;
+  b.disabled = true; b.classList.add("loading");
+  // ponytail: min 350ms so the spin is perceptible even when the DB read is instant
+  await Promise.all([load(), new Promise(r=>setTimeout(r,350))]);
+  b.disabled = false; b.classList.remove("loading");
+}
+
+$("#refresh").addEventListener("click", doRefresh);
+// reload when the window is re-shown (re-open from Dock/tray)
+if(window.rtk.onRefresh) window.rtk.onRefresh(doRefresh);
+
+load(); // initial load on launch
+</script>
+</body>
+</html>
