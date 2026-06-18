@@ -48,6 +48,7 @@
   .card .value.green{color:var(--green)}
   .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:22px}
   .panel h2{font-size:15px;margin:0 0 14px}
+  .panel .sub{margin:-7px 0 14px}
   .controls{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
   .controls[hidden]{display:none}
   .ctlrow{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
@@ -70,6 +71,7 @@
   th{color:var(--muted);font-weight:500}
   td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
   td.cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;max-width:520px;overflow:hidden;text-overflow:ellipsis}
+  .muted{color:var(--muted)}
   .pos{color:var(--green)} .zero{color:var(--muted)}
   .foot{color:var(--muted);font-size:12px;margin-top:8px}
 </style>
@@ -104,6 +106,7 @@
       <div class="controls seg" id="tsmode">
         <button data-m="total" class="active">total</button>
         <button data-m="project">by project</button>
+        <button data-m="model">by model</button>
       </div>
     </div>
     <div class="controls" id="range" hidden>
@@ -117,6 +120,20 @@
     <h2>Top commands by tokens saved</h2>
     <div id="cmdWrap"><canvas id="cmdChart" height="160"></canvas></div>
   </div>
+
+  <section class="panel">
+    <h2>Tokens saved by model</h2>
+    <div class="sub">Estimated/inferred from harness session timing; attribution may include an (unknown) bucket.</div>
+    <div id="modelWrap"><canvas id="modelChart" height="140"></canvas></div>
+    <div id="modelTable"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Tokens saved by harness</h2>
+    <div class="sub">Estimated/inferred from harness session timing; attribution may include an (unknown) bucket.</div>
+    <div id="harnessWrap"><canvas id="harnessChart" height="110"></canvas></div>
+    <div id="harnessTable"></div>
+  </section>
 
   <div class="panel">
     <h2>Recent activity</h2>
@@ -132,11 +149,11 @@ const humanK = n => { n=n||0; if(n>=1e6) return (n/1e6).toFixed(1).replace(/\.0$
 const humanTime = ms => { const s=Math.round((ms||0)/1000); if(s<60) return s+"s"; const m=Math.floor(s/60); if(m<60) return m+"m"+(s%60)+"s"; const h=Math.floor(m/60); return h+"h"+(m%60)+"m"; };
 
 let bucket = "daily";
-let tsMode = "total";   // "total" | "project"
+let tsMode = "total";   // "total" | "project" | "model"
 let scopeSel = [];   // selected project paths; empty = all
 let lastProjects = null;
 let data = null;
-let tsChart = null, cmdChart = null;
+let tsChart = null, cmdChart = null, modelChart = null, harnessChart = null;
 
 const $ = s => document.querySelector(s);
 
@@ -169,10 +186,10 @@ function tsSeries(){
   return daily.filter(p => (!from || p.period >= from) && (!to || p.period <= to));
 }
 
-// per-project rows for the active bucket (custom falls back to daily, range-filtered).
-function stackRows(){
+// stacked rows for the active bucket (custom falls back to daily, range-filtered).
+function stackRows(source){
   const key = bucket === "custom" ? "daily" : bucket;
-  let rows = (data.stacked && data.stacked[key]) || [];
+  let rows = (source && source[key]) || [];
   if(bucket === "custom"){
     const from = $("#from").value, to = $("#to").value;
     rows = rows.filter(r => (!from || r.period >= from) && (!to || r.period <= to));
@@ -180,20 +197,23 @@ function stackRows(){
   return rows;
 }
 
-function buildStacked(){
-  const rows = stackRows();
+function buildStacked(rows, keyField, labelFn){
+  rows = rows || stackRows(data.stacked);
+  keyField = keyField || "project";
+  labelFn = labelFn || projName;
   const periods = [...new Set(rows.map(r=>r.period))].sort();
   const idx = Object.fromEntries(periods.map((p,i)=>[p,i]));
-  const byProj = new Map();
+  const byKey = new Map();
   rows.forEach(r=>{
-    if(!byProj.has(r.project)) byProj.set(r.project, new Array(periods.length).fill(0));
-    byProj.get(r.project)[idx[r.period]] += r.saved||0;
+    const k = r[keyField] || (keyField === "project" ? "" : "(unknown)");
+    if(!byKey.has(k)) byKey.set(k, new Array(periods.length).fill(0));
+    byKey.get(k)[idx[r.period]] += r.saved||0;
   });
-  const ordered = [...byProj.entries()]
-    .map(([pr,arr])=>({pr,arr,total:arr.reduce((a,b)=>a+b,0)}))
+  const ordered = [...byKey.entries()]
+    .map(([key,arr])=>({key,arr,total:arr.reduce((a,b)=>a+b,0)}))
     .sort((a,b)=>b.total-a.total);
   const datasets = ordered.map((o,i)=>({
-    label: projName(o.pr),
+    label: labelFn(o.key),
     data: o.arr,
     backgroundColor: PALETTE[i % PALETTE.length],
     borderRadius: 3,
@@ -205,6 +225,7 @@ function buildStacked(){
 function drawTs(){
   if(tsChart){ tsChart.destroy(); tsChart=null; }
   if(tsMode === "project") return drawTsProject();
+  if(tsMode === "model") return drawTsModel();
   const series = tsSeries();
   if(!series.length){ $("#tsWrap").innerHTML = '<div class="empty">No history in range.</div>'; return; }
   ensureCanvas();
@@ -239,6 +260,22 @@ function drawTsProject(){
       }}});
 }
 
+function drawTsModel(){
+  const { periods, datasets } = buildStacked(stackRows(data.stackedByModel), "model", modelLabel);
+  if(!periods.length){ $("#tsWrap").innerHTML = '<div class="empty">No history in range.</div>'; return; }
+  ensureCanvas();
+  tsChart = new Chart($("#tsChart"), {
+    type:"bar",
+    data:{ labels: periods, datasets },
+    options:{responsive:true,interaction:{mode:"index",intersect:false},
+      plugins:{legend:{labels:{color:"#e6edf3",boxWidth:12,padding:10}},
+        tooltip:{callbacks:{label:c=>c.dataset.label+": "+fmt(c.parsed.y)}}},
+      scales:{
+        x:{stacked:true,ticks:{color:"#8b949e",maxRotation:0,autoSkip:true},grid:{color:"#21262d"}},
+        y:{stacked:true,title:{display:true,text:"Saved per "+SPAN[bucket]+" (by model)",color:"#8b949e"},ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+      }}});
+}
+
 function drawCmd(){
   const rows = (data.byCommand||[]);
   if(cmdChart){ cmdChart.destroy(); cmdChart=null; }
@@ -255,6 +292,57 @@ function drawCmd(){
         x:{ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
         y:{ticks:{color:"#8b949e"},grid:{display:false}},
       }}});
+}
+
+function modelLabel(m){ return m || "(unknown)"; }
+function harnessLabel(h){ return h==="copilot" ? "Copilot" : h==="claude" ? "Claude Code" : h==="codex" ? "Codex" : "Unknown"; }
+function isUnknown(v){ return !v || v === "(unknown)"; }
+function ensureBarCanvas(wrap, id, n){
+  const h = Math.max(100, n*24 + 28);
+  if(!$("#"+id)) $(wrap).innerHTML = `<canvas id="${id}" height="${h}"></canvas>`;
+  else $("#"+id).height = h;
+}
+
+function drawModel(){
+  const rows = data.byModel || [];
+  if(modelChart){ modelChart.destroy(); modelChart=null; }
+  if(!rows.length){ $("#modelWrap").innerHTML = '<div class="empty">No model data — is a supported harness installed?</div>'; $("#modelTable").innerHTML = ""; return; }
+  ensureBarCanvas("#modelWrap", "modelChart", rows.length);
+  modelChart = new Chart($("#modelChart"), {
+    type:"bar",
+    data:{ labels: rows.map(r=>modelLabel(r.model)), datasets:[
+      {label:"Tokens saved",data:rows.map(r=>r.saved||0),backgroundColor:rows.map((r,i)=>isUnknown(r.model)?"#8b949ecc":PALETTE[i % PALETTE.length]+"cc"),borderRadius:4}
+    ]},
+    options:{indexAxis:"y",responsive:true,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{const r=rows[c.dataIndex]; return fmt(r.saved)+" saved · "+fmt(r.cmds)+" commands";}}}},
+      scales:{
+        x:{ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+        y:{ticks:{color:"#8b949e"},grid:{display:false}},
+      }}});
+  $("#modelTable").innerHTML = `<table><thead><tr><th>Model</th><th class="num">Saved</th><th class="num">Commands</th><th class="num">Savings %</th></tr></thead><tbody>${
+    rows.map(r=>`<tr><td class="${isUnknown(r.model)?'muted':''}">${escapeHtml(modelLabel(r.model))}</td><td class="num">${fmt(r.saved)}</td><td class="num">${fmt(r.cmds)}</td><td class="num">${(r.pct||0).toFixed(1)}%</td></tr>`).join("")
+  }</tbody></table>`;
+}
+
+function drawHarness(){
+  const rows = data.byHarness || [];
+  if(harnessChart){ harnessChart.destroy(); harnessChart=null; }
+  if(!rows.length){ $("#harnessWrap").innerHTML = '<div class="empty">No harness data.</div>'; $("#harnessTable").innerHTML = ""; return; }
+  ensureBarCanvas("#harnessWrap", "harnessChart", rows.length);
+  harnessChart = new Chart($("#harnessChart"), {
+    type:"bar",
+    data:{ labels: rows.map(r=>harnessLabel(r.harness)), datasets:[
+      {label:"Tokens saved",data:rows.map(r=>r.saved||0),backgroundColor:rows.map((r,i)=>isUnknown(r.harness)?"#8b949ecc":PALETTE[i % PALETTE.length]+"cc"),borderRadius:4}
+    ]},
+    options:{indexAxis:"y",responsive:true,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{const r=rows[c.dataIndex]; return fmt(r.saved)+" saved · "+fmt(r.cmds)+" commands";}}}},
+      scales:{
+        x:{ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+        y:{ticks:{color:"#8b949e"},grid:{display:false}},
+      }}});
+  $("#harnessTable").innerHTML = `<table><thead><tr><th>Harness</th><th class="num">Saved</th><th class="num">Commands</th><th class="num">Savings %</th></tr></thead><tbody>${
+    rows.map(r=>`<tr><td class="${isUnknown(r.harness)?'muted':''}">${escapeHtml(harnessLabel(r.harness))}</td><td class="num">${fmt(r.saved)}</td><td class="num">${fmt(r.cmds)}</td><td class="num">${(r.pct||0).toFixed(1)}%</td></tr>`).join("")
+  }</tbody></table>`;
 }
 
 function drawRecent(){
@@ -306,6 +394,8 @@ function render(){
   fillScope();
   drawTs();
   drawCmd();
+  drawModel();
+  drawHarness();
   drawRecent();
   const since = s.since ? new Date(s.since) : null;
   $("#meta").textContent =
