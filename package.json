@@ -3,7 +3,10 @@
   "productName": "rtk Savings",
   "version": "1.0.0",
   "description": "Menu bar/tray app + dashboard tracking tokens saved by rtk",
-  "author": "pedrolacerda",
+  "author": {
+    "name": "pedrolacerda",
+    "email": "pedrohrl1@gmail.com"
+  },
   "license": "MIT",
   "main": "main.js",
   "scripts": {
