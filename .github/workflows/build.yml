@@ -8,6 +8,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -48,3 +51,47 @@ jobs:
             dist/*.exe
             dist/*.AppImage
             dist/*.deb
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rtk-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify downloaded artifacts
+        run: |
+          ls -la release-assets
+          shopt -s nullglob
+          missing=()
+          for ext in dmg zip exe AppImage deb; do
+            matches=(release-assets/*.${ext})
+            if [ ${#matches[@]} -eq 0 ]; then
+              missing+=(".${ext}")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "Missing expected release artifacts for: ${missing[*]}"
+            echo "Expected file types: .dmg .zip .exe .AppImage .deb"
+            exit 1
+          fi
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.0.0-main-latest
+          target_commitish: ${{ github.sha }}
+          name: Main latest build
+          prerelease: true
+          generate_release_notes: true
+          overwrite_files: true
+          files: |
+            release-assets/*.dmg
+            release-assets/*.zip
+            release-assets/*.exe
+            release-assets/*.AppImage
+            release-assets/*.deb
