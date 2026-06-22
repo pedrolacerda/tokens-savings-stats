@@ -170,6 +170,17 @@
 </div>
 
 <script>
+// Tauri bridge: replaces the Electron preload's contextBridge `window.rtk`.
+// get_stats is a Rust #[tauri::command]; `refresh` is emitted on window reopen.
+const __T = window.__TAURI__;
+window.rtk = __T ? {
+  getStats: (opts) => __T.core.invoke("get_stats", { opts: opts || {} }),
+  onRefresh: (cb) => { if (__T.event) __T.event.listen("refresh", () => cb()); },
+} : {
+  getStats: async () => { throw new Error("Tauri bridge unavailable"); },
+  onRefresh: () => {},
+};
+
 const fmt = n => (n||0).toLocaleString();
 const humanK = n => { n=n||0; if(n>=1e6) return (n/1e6).toFixed(1).replace(/\.0$/,"")+"M"; if(n>=1e3) return (n/1e3).toFixed(1).replace(/\.0$/,"")+"K"; return String(n); };
 const humanTime = ms => { const s=Math.round((ms||0)/1000); if(s<60) return s+"s"; const m=Math.floor(s/60); if(m<60) return m+"m"+(s%60)+"s"; const h=Math.floor(m/60); return h+"h"+(m%60)+"m"; };
