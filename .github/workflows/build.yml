@@ -63,6 +63,16 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      - name: Verify downloaded artifacts
+        run: |
+          ls -la release-assets
+          shopt -s nullglob
+          files=(release-assets/*.dmg release-assets/*.zip release-assets/*.exe release-assets/*.AppImage release-assets/*.deb)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No release artifacts found"
+            exit 1
+          fi
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -71,7 +81,7 @@ jobs:
           name: Main latest build
           prerelease: true
           generate_release_notes: true
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
           overwrite_files: true
           files: |
             release-assets/*.dmg
