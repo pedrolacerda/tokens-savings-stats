@@ -83,12 +83,11 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: main-latest
+          tag_name: v0.0.0-main-latest
           target_commitish: ${{ github.sha }}
           name: Main latest build
           prerelease: true
           generate_release_notes: true
-          fail_on_unmatched_files: true
           overwrite_files: true
           files: |
             release-assets/*.dmg
