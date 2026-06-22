@@ -74,6 +74,25 @@
   .muted{color:var(--muted)}
   .pos{color:var(--green)} .zero{color:var(--muted)}
   .foot{color:var(--muted);font-size:12px;margin-top:8px}
+  /* date range picker */
+  .drp{position:relative;display:inline-block}
+  .drp-btn{min-width:190px;display:inline-flex;align-items:center;gap:7px}
+  .drp-pop{position:absolute;top:calc(100% + 8px);left:0;z-index:30;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 14px 12px;box-shadow:0 12px 32px rgba(1,4,9,.75);min-width:252px;user-select:none}
+  .cal-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .cal-hdr span{font-size:13px;font-weight:600}
+  .cal-nav{background:transparent;border:0;color:var(--muted);padding:3px 8px;border-radius:6px;cursor:pointer;font-size:17px;line-height:1}
+  .cal-nav:hover{background:#21262d;color:var(--fg)}
+  .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:1px}
+  .cal-dow{text-align:center;font-size:11px;color:var(--muted);padding:3px 0 6px;font-weight:500}
+  .cal-day{text-align:center;font-size:12px;padding:6px 3px;border-radius:5px;cursor:pointer;transition:background .08s;line-height:1.4}
+  .cal-day:not(.cal-empty):hover{background:#1f2630}
+  .cal-day.today{color:var(--accent);font-weight:700}
+  .cal-day.start,.cal-day.end{background:var(--accent)!important;color:#fff!important;border-radius:5px}
+  .cal-day.in-range{background:rgba(47,129,247,.15);border-radius:0}
+  .cal-day.cal-empty{cursor:default}
+  .drp-footer{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)}
+  .cal-clear{background:transparent;border:0;color:var(--accent);padding:2px 0;font-size:12px;cursor:pointer}
+  .cal-clear:hover{text-decoration:underline}
 </style>
 </head>
 <body>
@@ -110,8 +129,15 @@
       </div>
     </div>
     <div class="controls" id="range" hidden>
-      <label>from <input type="date" id="from"></label>
-      <label>to <input type="date" id="to"></label>
+      <input type="date" id="from" hidden>
+      <input type="date" id="to" hidden>
+      <div class="drp" id="drp">
+        <button class="drp-btn" id="drpBtn">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          <span id="drpLabel">Pick range…</span>
+        </button>
+        <div class="drp-pop" id="drpPop" hidden></div>
+      </div>
     </div>
     <div id="tsWrap"><canvas id="tsChart" height="110"></canvas></div>
   </div>
@@ -416,6 +442,7 @@ function initRangeDefaults(){
   if(!daily.length) return;
   if(!$("#from").value) $("#from").value = daily[0].period;
   if(!$("#to").value) $("#to").value = daily[daily.length-1].period;
+  syncDrpLabel();
 }
 
 $("#buckets").addEventListener("click", e=>{
@@ -467,6 +494,101 @@ $("#refresh").addEventListener("click", doRefresh);
 if(window.rtk.onRefresh) window.rtk.onRefresh(doRefresh);
 
 load(); // initial load on launch
+
+// === date range picker ===
+let drp = { y: new Date().getFullYear(), m: new Date().getMonth(), picking: 'start', hoverD: null };
+
+function drpFmt(v){
+  if(!v) return '';
+  const d = new Date(v+'T00:00:00');
+  return d.toLocaleDateString([], {month:'short', day:'numeric'});
+}
+
+function syncDrpLabel(){
+  const el = $("#drpLabel"); if(!el) return;
+  const f = $("#from").value, t = $("#to").value;
+  el.textContent = (f&&t) ? drpFmt(f)+' – '+drpFmt(t) : f ? drpFmt(f)+' →…' : 'Pick range…';
+}
+
+function renderDrpCal(){
+  const {y,m,picking,hoverD} = drp;
+  const from = $("#from").value, to = $("#to").value;
+  const today = new Date().toISOString().slice(0,10);
+  // compute visible range highlight
+  let rS, rE;
+  if(picking==='start'){ rS=from; rE=to; }
+  else if(hoverD&&from){ rS=hoverD<from?hoverD:from; rE=hoverD<from?from:hoverD; }
+  else { rS=from; rE=null; }
+  const firstDay = new Date(y,m,1).getDay();
+  const dim = new Date(y,m+1,0).getDate();
+  const mname = new Date(y,m,1).toLocaleDateString([],{month:'long',year:'numeric'});
+  let cells = '';
+  for(let i=0;i<firstDay;i++) cells += '<div class="cal-day cal-empty"></div>';
+  for(let d=1;d<=dim;d++){
+    const iso = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const cls = ['cal-day'];
+    if(iso===today) cls.push('today');
+    if(iso===rS) cls.push('start');
+    if(iso===rE) cls.push('end');
+    if(rS&&rE&&iso>rS&&iso<rE) cls.push('in-range');
+    cells += `<div class="${cls.join(' ')}" data-d="${iso}">${d}</div>`;
+  }
+  const pop = $("#drpPop");
+  pop.innerHTML = `<div class="cal-hdr">
+    <button class="cal-nav" id="calPrev">‹</button>
+    <span>${mname}</span>
+    <button class="cal-nav" id="calNext">›</button>
+  </div>
+  <div class="cal-grid">
+    ${'SMTWTFS'.split('').map(x=>`<div class="cal-dow">${x}</div>`).join('')}
+    ${cells}
+  </div>
+  <div class="drp-footer">
+    <span>${picking==='start'?'Select start date':'Select end date'}</span>
+    <button class="cal-clear">Clear</button>
+  </div>`;
+  $("#calPrev").onclick = ()=>{ drp.m--; if(drp.m<0){drp.m=11;drp.y--;} renderDrpCal(); };
+  $("#calNext").onclick = ()=>{ drp.m++; if(drp.m>11){drp.m=0;drp.y++;} renderDrpCal(); };
+  pop.querySelector('.cal-clear').onclick = ()=>{
+    $("#from").value=''; $("#to").value='';
+    drp.picking='start'; drp.hoverD=null;
+    syncDrpLabel(); renderDrpCal(); drawTs();
+  };
+  pop.querySelectorAll('.cal-day[data-d]').forEach(el=>{
+    el.addEventListener('mouseover', ()=>{ if(drp.picking==='end'){ drp.hoverD=el.dataset.d; renderDrpCal(); } });
+    el.addEventListener('click', ()=>{
+      const d = el.dataset.d;
+      if(drp.picking==='start'){
+        $("#from").value=d; $("#to").value='';
+        drp.picking='end'; drp.hoverD=null;
+      } else {
+        let a=$("#from").value, b=d;
+        if(b<a)[a,b]=[b,a];
+        $("#from").value=a; $("#to").value=b;
+        drp.picking='start'; drp.hoverD=null;
+        $("#drpPop").hidden=true;
+        drawTs();
+      }
+      syncDrpLabel();
+      if(!$("#drpPop").hidden) renderDrpCal();
+    });
+  });
+}
+
+$("#drpBtn").addEventListener('click', e=>{
+  e.stopPropagation();
+  const pop = $("#drpPop");
+  if(pop.hidden){
+    const f = $("#from").value;
+    if(f){ const d=new Date(f+'T00:00:00'); drp.y=d.getFullYear(); drp.m=d.getMonth(); }
+    else { const n=new Date(); drp.y=n.getFullYear(); drp.m=n.getMonth(); }
+    pop.hidden=false; renderDrpCal();
+  } else { pop.hidden=true; }
+});
+
+document.addEventListener('click', e=>{
+  if(!document.getElementById('drp').contains(e.target)) $("#drpPop").hidden=true;
+});
 </script>
 </body>
 </html>
