@@ -67,9 +67,16 @@ jobs:
         run: |
           ls -la release-assets
           shopt -s nullglob
-          files=(release-assets/*.dmg release-assets/*.zip release-assets/*.exe release-assets/*.AppImage release-assets/*.deb)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No release artifacts found"
+          missing=()
+          for ext in dmg zip exe AppImage deb; do
+            matches=(release-assets/*.${ext})
+            if [ ${#matches[@]} -eq 0 ]; then
+              missing+=(".${ext}")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "Missing expected release artifacts for: ${missing[*]}"
+            echo "Expected file types: .dmg .zip .exe .AppImage .deb"
             exit 1
           fi
 
@@ -81,7 +88,7 @@ jobs:
           name: Main latest build
           prerelease: true
           generate_release_notes: true
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
           overwrite_files: true
           files: |
             release-assets/*.dmg
