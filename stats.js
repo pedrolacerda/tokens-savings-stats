@@ -168,9 +168,9 @@ function summary(projects) {
 }
 
 const BUCKET_SQL = {
-  daily: "strftime('%Y-%m-%d', timestamp)",
-  weekly: "strftime('%Y-W%W', timestamp)",
-  monthly: "strftime('%Y-%m', timestamp)",
+  daily: "strftime('%Y-%m-%d', timestamp, 'localtime')",
+  weekly: "strftime('%Y-W%W', timestamp, 'localtime')",
+  monthly: "strftime('%Y-%m', timestamp, 'localtime')",
 };
 
 function timeseries(bucket, projects) {
@@ -442,22 +442,22 @@ function byHarness(projects, rows) {
 function sqliteWeekPeriod(ms) {
   if (!Number.isFinite(ms)) return "";
   const d = new Date(ms);
-  const year = d.getUTCFullYear();
-  const day = Date.UTC(year, d.getUTCMonth(), d.getUTCDate());
-  const yday = Math.floor((day - Date.UTC(year, 0, 1)) / 86400000);
-  const mondayDay = (d.getUTCDay() + 6) % 7;
+  const year = d.getFullYear();
+  const yday = Math.floor(
+    (new Date(year, d.getMonth(), d.getDate()) - new Date(year, 0, 1)) /
+      86400000
+  );
+  const mondayDay = (d.getDay() + 6) % 7;
   const week = Math.floor((yday + 7 - mondayDay) / 7);
   return `${year}-W${String(week).padStart(2, "0")}`;
 }
 
 function periodFor(bucket, r) {
-  const s = String(r.timestamp || "");
-  if (bucket === "monthly") return s.slice(0, 7);
-  if (bucket === "weekly") {
-    // ponytail: JS bucket after attribution; formula matches SQLite strftime('%W').
-    return sqliteWeekPeriod(r.ts);
-  }
-  return s.slice(0, 10);
+  const d = new Date(r.ts);
+  if (bucket === "monthly")
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  if (bucket === "weekly") return sqliteWeekPeriod(r.ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function timeseriesByModel(bucket, projects, rows) {

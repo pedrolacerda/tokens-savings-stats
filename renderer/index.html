@@ -349,7 +349,7 @@ function drawRecent(){
   const rows = (data.recent||[]);
   if(!rows.length){ $("#recent").innerHTML = '<div class="empty">No activity yet.</div>'; return; }
   const body = rows.map(r=>{
-    const t = new Date(r.timestamp);
+    const t = new Date(r.timestamp.replace(" ", "T") + "Z");
     const when = isNaN(t) ? r.timestamp : t.toLocaleString([], {month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
     const saved = r.saved_tokens||0;
     const cls = saved>0 ? "pos" : "zero";
@@ -397,7 +397,7 @@ function render(){
   drawModel();
   drawHarness();
   drawRecent();
-  const since = s.since ? new Date(s.since) : null;
+  const since = s.since ? new Date(s.since.replace(" ", "T") + "Z") : null;
   $("#meta").textContent =
     (data.available ? "" : "rtk history.db not found · ") +
     (since && !isNaN(since) ? "since "+since.toLocaleDateString([], {month:"short",day:"numeric",year:"numeric"})+" · " : "") +
