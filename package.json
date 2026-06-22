@@ -1,55 +1,20 @@
 {
-  "name": "rtk-token-savings",
+  "name": "rtk-savings",
   "productName": "rtk Savings",
   "version": "1.0.0",
-  "description": "Menu bar/tray app + dashboard tracking tokens saved by rtk",
+  "description": "Native macOS menu bar/tray app + dashboard tracking tokens saved by rtk (Tauri/Pake)",
   "author": "pedrolacerda",
   "license": "MIT",
-  "main": "main.js",
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
-    "start": "electron .",
-    "stats": "node stats.js",
-    "dist": "electron-builder",
-    "dist:mac": "electron-builder --mac",
-    "dist:win": "electron-builder --win",
-    "dist:linux": "electron-builder --linux"
-  },
-  "build": {
-    "appId": "me.pedrolacerda.rtksavings",
-    "productName": "rtk Savings",
-    "files": [
-      "main.js",
-      "preload.js",
-      "stats.js",
-      "renderer/**",
-      "build/*.png"
-    ],
-    "mac": {
-      "category": "public.app-category.developer-tools",
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "icon": "build/icon.png"
-    },
-    "win": {
-      "target": [
-        "nsis",
-        "zip"
-      ],
-      "icon": "build/icon.png"
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "category": "Utility",
-      "icon": "build/icon.png"
-    }
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:mac": "tauri build --bundles app dmg",
+    "build:win": "tauri build --bundles nsis msi",
+    "build:linux": "tauri build --bundles deb appimage rpm",
+    "tauri": "tauri"
   },
   "devDependencies": {
-    "electron": "^42.4.1",
-    "electron-builder": "^26.15.3"
+    "@tauri-apps/cli": "2.10.0"
   }
 }

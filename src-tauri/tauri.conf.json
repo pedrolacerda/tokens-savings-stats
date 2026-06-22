@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "rtk Savings",
+  "identifier": "me.pedrolacerda.rtksavings",
+  "version": "1.0.0",
+  "app": {
+    "withGlobalTauri": true,
+    "trayIcon": {
+      "iconPath": "icons/trayTemplate.png",
+      "iconAsTemplate": true,
+      "id": "pake-tray"
+    },
+    "security": {
+      "headers": {},
+      "csp": null
+    }
+  },
+  "build": {
+    "frontendDist": "../renderer"
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

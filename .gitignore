@@ -1,5 +1,8 @@
 # dependencies
 node_modules/
+.pake-upstream/
+src-tauri/gen/
+src-tauri/target/
 
 # build output
 dist/
