@@ -1,7 +1,7 @@
 # rtk Savings
 
 A cross-platform menu bar / tray app + dashboard that tracks how many tokens
-you've saved with [`rtk`](https://github.com/) since you started using it.
+you've saved with [`rtk`](https://github.com/rtk-ai/rtk) since you started using it.
 
 - **Menu bar / tray:** shows live `66% · 256K` (overall savings % + total tokens saved).
 - **Dashboard:** opens on launch (and from the Dock/tray or menu bar icon) — summary cards, tokens-saved over time (daily/weekly/monthly, or a **custom** date range), top commands, and a recent-activity feed — with a **Global / multi-project** scope filter. Data refreshes on launch, on re-open, and via the **↻ Refresh** button (no background polling).
