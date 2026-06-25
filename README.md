@@ -4,7 +4,7 @@ A cross-platform menu bar / tray app + dashboard that tracks how many tokens
 you've saved with [`rtk`](https://github.com/rtk-ai/rtk) since you started using it.
 
 - **Menu bar / tray:** shows live `66% · 256K` (overall savings % + total tokens saved).
-- **Dashboard:** opens on launch (and from the Dock/tray or menu bar icon) — summary cards, tokens-saved over time (daily/weekly/monthly, or a **custom** date range), top commands, and a recent-activity feed — with a **Global / multi-project** scope filter. Data refreshes on launch, on re-open, and via the **↻ Refresh** button (no background polling).
+- **Dashboard:** opens on launch (and from the Dock/tray or menu bar icon) — summary cards, tokens-saved over time (daily/weekly/monthly, or a **custom** date range), top commands, **per-model and per-harness** breakdowns, and a recent-activity feed — with a **Global / multi-project** scope filter. Data refreshes on launch, on re-open, and via the **↻ Refresh** button (no background polling).
 
 It reads rtk's own SQLite history via the `sqlite3` CLI (`-json`) — no native
 modules, nothing to rebuild. The DB path is resolved per-OS (override with the
@@ -60,5 +60,6 @@ Pick one:
 
 ## Notes
 
+- Model / harness / project are inferred by matching each rtk command to the AI-coding session that was active at that time, read from each tool's local session logs under your home dir: **GitHub Copilot CLI & App** (`~/.copilot/session-state`), **Claude Code** (`~/.claude/projects`), **Codex** (`~/.codex/sessions`), and **OpenCode** (`~/.local/share/opencode`). Commands with no nearby session land in an `(unknown)` bucket.
 - "Savings %" matches `rtk gain` (overall `saved / input`, not the mean of per-command percentages).
 - Replace `build/icon.png` / `build/trayTemplate.png` to customize the icons.

@@ -1,13 +1,19 @@
 "use strict";
-// Reads rtk's own SQLite history via the stock sqlite3 CLI (-json).
-// ponytail: CLI over a native sqlite module — zero deps, no electron-rebuild.
+// Reads rtk's SQLite history and the local AI-harness session logs, then attributes
+// each rtk command to the model / harness / workspace that was active when it ran.
+//
+// Harness capture rules are ported from the ai-engineering-coach parsers
+// (src/core/parser-*.ts): GitHub Copilot CLI vs App via session.start, Codex via
+// rollout JSONL, Claude via projects JSONL, OpenCode via local storage.
+// ponytail: sqlite via the stock CLI (-json) — zero native deps, no electron-rebuild.
 const { execFileSync } = require("child_process");
 const os = require("os");
 const path = require("path");
 const fs = require("fs");
 
-// rtk stores history under the OS config dir (same convention as the `directories`
-// crate). ponytail: best-effort per-OS paths; override with RTK_DB if rtk differs.
+// ---------------------------------------------------------------------------
+// Paths (per-OS, env-overridable)
+// ---------------------------------------------------------------------------
 function rtkDbPath() {
   if (process.env.RTK_DB) return process.env.RTK_DB;
   const home = os.homedir();
@@ -28,80 +34,40 @@ const DB = rtkDbPath();
 // macOS: absolute path (Finder-launched apps get a minimal PATH); else rely on PATH.
 const SQLITE = process.platform === "darwin" ? "/usr/bin/sqlite3" : "sqlite3";
 const MAX_GAP_MS = 4 * 3600 * 1000;
-const claudeCache = new Map();
+// ponytail: a single command saving more than this is treated as an outlier — e.g. a
+// recursive `grep -rn` that walked node_modules and "saved" 11M tokens of output.
+// One tunable knob; raise it if a real workload legitimately saves >1M per command.
+const OUTLIER_SAVED = 1000000;
 
 function dbExists() {
   return fs.existsSync(DB);
 }
 
-function copilotDbPath() {
-  if (process.env.COPILOT_DB) return process.env.COPILOT_DB;
-  return path.join(os.homedir(), ".copilot", "data.db");
-}
-
-function claudeDir() {
-  if (process.env.CLAUDE_DIR) return process.env.CLAUDE_DIR;
-  return path.join(os.homedir(), ".claude", "projects");
-}
-
-function codexDbPath() {
-  if (process.env.CODEX_DB) return process.env.CODEX_DB;
-  return path.join(os.homedir(), ".codex", "state_5.sqlite");
-}
-
 function copilotStateDir() {
-  if (process.env.COPILOT_STATE_DIR) return process.env.COPILOT_STATE_DIR;
-  return path.join(os.homedir(), ".copilot", "session-state");
+  return process.env.COPILOT_STATE_DIR || path.join(os.homedir(), ".copilot", "session-state");
 }
-
-// Copilot's data.db only stores the routing token ("auto", or null/empty); the
-// model that actually ran lives per-session in session-state/<id>/events.jsonl.
-// Resolve once per session id, keyed on the events.jsonl mtime.
-const copilotModelCache = new Map();
-
-// Returns { model, viaAuto }. data.db records a concrete name when a model was
-// pinned, the literal "auto" when Copilot routed, and NULL/empty when it simply
-// wasn't persisted. The real model always lives in the session's events.jsonl, so
-// resolve there for BOTH "auto" and NULL/empty -- but only literal "auto" is truly
-// Auto-routed. NULL/empty is just unrecorded (often a pinned model data.db didn't
-// store), so it must NOT be labeled "(via Auto)".
-function resolveCopilotModel(id, rawModel) {
-  const raw = rawModel == null ? "" : String(rawModel);
-  if (raw !== "" && raw !== "auto") return { model: raw, viaAuto: false };
-  const resolved = copilotEventModel(id);
-  return { model: resolved || "(unknown)", viaAuto: raw === "auto" };
+function claudeDir() {
+  return process.env.CLAUDE_DIR || path.join(os.homedir(), ".claude", "projects");
 }
-
-// First assistant.message model in a session's events.jsonl (representative model).
-// ponytail: first message only; Auto rarely switches mid-session.
-function copilotEventModel(id) {
-  if (!id) return null;
-  let file;
-  try {
-    file = path.join(copilotStateDir(), id, "events.jsonl");
-    const st = fs.statSync(file);
-    const cached = copilotModelCache.get(id);
-    if (cached && cached.mtimeMs === st.mtimeMs) return cached.model;
-    let model = null;
-    for (const l of fs.readFileSync(file, "utf8").split("\n")) {
-      if (!l.includes('"assistant.message"') || !l.includes('"model"')) continue;
-      try {
-        const o = JSON.parse(l);
-        if (o.type === "assistant.message" && o.data && o.data.model) {
-          model = o.data.model;
-          break;
-        }
-      } catch {
-        // tolerate a truncated final JSONL line
-      }
-    }
-    copilotModelCache.set(id, { mtimeMs: st.mtimeMs, model });
-    return model;
-  } catch {
-    return null;
+function codexSessionsDirs() {
+  const home = os.homedir();
+  const dirs = [];
+  for (const name of ["sessions", "archived_sessions", "archived-sessions"]) {
+    const d = path.join(home, ".codex", name);
+    if (fs.existsSync(d)) dirs.push(d);
   }
+  return dirs;
+}
+function codexDbPath() {
+  return process.env.CODEX_DB || path.join(os.homedir(), ".codex", "state_5.sqlite");
+}
+function opencodeStorageDir() {
+  return process.env.OPENCODE_DIR || path.join(os.homedir(), ".local", "share", "opencode", "storage");
 }
 
+// ---------------------------------------------------------------------------
+// sqlite + small IO/time helpers
+// ---------------------------------------------------------------------------
 function qDb(dbPath, sql) {
   if (!dbPath || !fs.existsSync(dbPath)) return [];
   // ponytail: normal open (SELECT-only) — WAL mode rejects a read-only open when
@@ -119,166 +85,30 @@ function q(sql) {
 
 function toMs(t) {
   if (t == null) return NaN;
+  if (typeof t === "number") return t;
   let s = String(t).trim().replace(" ", "T");
   if (!/[Z+]/.test(s.slice(10))) s += "Z";
   return Date.parse(s);
 }
 
-// project filter values come from the DB (getProjects). Validate membership and
-// escape quotes before interpolation — trust boundary, not simplified away.
-// Empty list = no filter (all projects).
-function whereProjects(list) {
-  if (!Array.isArray(list) || !list.length) return "";
-  const valid = getProjects();
-  const sel = list.filter((p) => valid.includes(p));
-  if (!sel.length) return "";
-  const vals = sel.map((p) => `'${p.replace(/'/g, "''")}'`).join(",");
-  return ` WHERE project_path IN (${vals})`;
-}
-
-function getProjects() {
-  return q(
-    "SELECT DISTINCT project_path FROM commands WHERE project_path != '' ORDER BY project_path"
-  ).map((r) => r.project_path);
-}
-
-function summary(projects) {
-  const w = whereProjects(projects);
-  const r = q(
-    `SELECT COUNT(*) commands,
-            COALESCE(SUM(input_tokens),0) input,
-            COALESCE(SUM(output_tokens),0) output,
-            COALESCE(SUM(saved_tokens),0) saved,
-            COALESCE(SUM(exec_time_ms),0) time_ms,
-            MIN(timestamp) since
-     FROM commands${w}`
-  )[0] || {};
-  const input = r.input || 0;
-  const saved = r.saved || 0;
-  return {
-    commands: r.commands || 0,
-    input,
-    output: r.output || 0,
-    saved,
-    // ponytail: overall ratio (matches `rtk gain`), not mean of per-row pct.
-    pct: input > 0 ? (saved / input) * 100 : 0,
-    time_ms: r.time_ms || 0,
-    since: r.since || null,
-  };
-}
-
-const BUCKET_SQL = {
-  daily: "strftime('%Y-%m-%d', timestamp, 'localtime')",
-  weekly: "strftime('%Y-W%W', timestamp, 'localtime')",
-  monthly: "strftime('%Y-%m', timestamp, 'localtime')",
-};
-
-function timeseries(bucket, projects) {
-  const expr = BUCKET_SQL[bucket] || BUCKET_SQL.daily;
-  const w = whereProjects(projects);
-  return q(
-    `SELECT ${expr} period,
-            COALESCE(SUM(saved_tokens),0) saved,
-            COALESCE(SUM(input_tokens),0) input,
-            COUNT(*) commands
-     FROM commands${w}
-     GROUP BY period ORDER BY period`
-  );
-}
-
-// per-project breakdown per bucket, for stacked bars.
-function timeseriesByProject(bucket, projects) {
-  const expr = BUCKET_SQL[bucket] || BUCKET_SQL.daily;
-  const w = whereProjects(projects);
-  return q(
-    `SELECT ${expr} period,
-            project_path project,
-            COALESCE(SUM(saved_tokens),0) saved
-     FROM commands${w}
-     GROUP BY period, project_path
-     HAVING saved <> 0
-     ORDER BY period`
-  );
-}
-
-// Normalize "rtk read /some/file" -> "rtk read". ponytail: naive first-two-token
-// grouping; widen if commands need finer buckets.
-function normalizeCmd(cmd) {
-  const parts = cmd.trim().split(/\s+/);
-  return parts.slice(0, 2).join(" ") || cmd;
-}
-
-function byCommand(projects, limit = 15) {
-  const w = whereProjects(projects);
-  const rows = q(
-    `SELECT rtk_cmd,
-            COUNT(*) n,
-            COALESCE(SUM(saved_tokens),0) saved,
-            COALESCE(SUM(input_tokens),0) input
-     FROM commands${w}
-     GROUP BY rtk_cmd`
-  );
-  const merged = new Map();
-  for (const r of rows) {
-    const key = normalizeCmd(r.rtk_cmd);
-    const m = merged.get(key) || { command: key, n: 0, saved: 0, input: 0 };
-    m.n += r.n;
-    m.saved += r.saved;
-    m.input += r.input;
-    merged.set(key, m);
-  }
-  return [...merged.values()]
-    .sort((a, b) => b.saved - a.saved)
-    .slice(0, limit);
-}
-
-function recent(projects, limit = 50) {
-  const w = whereProjects(projects);
-  return q(
-    `SELECT timestamp, rtk_cmd, saved_tokens, savings_pct
-     FROM commands${w} ORDER BY id DESC LIMIT ${Number(limit) || 50}`
-  );
-}
-
-function copilotActivity() {
+function readJsonSafe(file) {
   try {
-    return qDb(
-      copilotDbPath(),
-      "SELECT id, created_at ts, model FROM sessions"
-    )
-      .map((r) => {
-        const { model, viaAuto } = resolveCopilotModel(r.id, r.model);
-        return {
-          ts: toMs(r.ts),
-          model,
-          viaAuto,
-          harness: "copilot",
-          cwd: undefined,
-        };
-      })
-      .filter((r) => Number.isFinite(r.ts));
+    return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
-    return [];
+    return null;
   }
 }
 
-function codexActivity() {
+// ponytail: read only the first chunk — session_meta is line 1 and the first
+// turn_context is early, so we never need the whole (possibly huge) rollout file.
+function readHead(file, maxBytes = 65536) {
+  const fd = fs.openSync(file, "r");
   try {
-    return qDb(
-      codexDbPath(),
-      `SELECT strftime('%Y-%m-%dT%H:%M:%S', created_at, 'unixepoch') ts,
-              COALESCE(NULLIF(model,''),'(unknown)') model, cwd
-       FROM threads WHERE model IS NOT NULL`
-    )
-      .map((r) => ({
-        ts: toMs(r.ts),
-        model: r.model,
-        harness: "codex",
-        cwd: r.cwd,
-      }))
-      .filter((r) => Number.isFinite(r.ts));
-  } catch {
-    return [];
+    const buf = Buffer.allocUnsafe(maxBytes);
+    const n = fs.readSync(fd, buf, 0, maxBytes, 0);
+    return buf.toString("utf8", 0, n);
+  } finally {
+    fs.closeSync(fd);
   }
 }
 
@@ -290,6 +120,249 @@ function jsonlFiles(dir, out = []) {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Model name normalization (ported from ai-engineering-coach helpers.normalizeModel).
+// Clean display labels: strip vendor prefixes, claude hyphen->dot versions, and a
+// known set of reasoning-effort suffixes.
+// ponytail: effort-suffix stripping is limited to explicit effort words so it never
+// eats -mini/-flash/-nano; widen the suffix list if a new reasoning tier appears.
+// ---------------------------------------------------------------------------
+function normalizeModel(modelId) {
+  let m = String(modelId == null ? "" : modelId).trim();
+  if (!m) return m;
+  for (const prefix of ["copilot/", "github.copilot-chat/", "github/"]) {
+    if (m.startsWith(prefix)) {
+      m = m.slice(prefix.length);
+      break;
+    }
+  }
+  m = m.replace(/-thought$/, "").replace(/-preview$/, "").replace(/-latest$/, "");
+  if (m.startsWith("claude-")) {
+    m = m.replace(/-\d{8}$/, "");
+    m = m.replace(/(\d)-(\d)/, "$1.$2");
+  }
+  m = m.replace(/-(?:xhigh|high|medium|low|minimal)$/i, "");
+  return m.trim() || "(unknown)";
+}
+
+// ---------------------------------------------------------------------------
+// Harness activity collectors — each yields rows of:
+//   { ts, model, cwd, harness, viaAuto }
+// best-effort: a missing source returns []. mtime caches keep repeated refreshes
+// cheap. `minMs` skips sessions whose file mtime predates the earliest rtk command
+// by more than one attribution gap (they can never be the nearest activity).
+// ---------------------------------------------------------------------------
+function staleCutoff(minMs) {
+  return minMs ? minMs - MAX_GAP_MS : 0;
+}
+
+// --- GitHub Copilot CLI / App: ~/.copilot/session-state/<id>/events.jsonl ---
+const copilotCache = new Map();
+
+function parseCopilotSession(file) {
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  let isApp = false;
+  let cwd = "";
+  let selectedModel = "";
+  let startTime = null;
+  let lastChange = "";
+  let firstAssistant = "";
+  let firstMetric = "";
+  let firstTs = null;
+  for (const l of text.split("\n")) {
+    if (!l || !l.includes('"type"')) continue;
+    let o;
+    try {
+      o = JSON.parse(l);
+    } catch {
+      continue; // tolerate a truncated final JSONL line
+    }
+    const d = o.data || {};
+    if (firstTs == null && o.timestamp) {
+      const t = toMs(o.timestamp);
+      if (Number.isFinite(t)) firstTs = t;
+    }
+    switch (o.type) {
+      case "session.start":
+        // ponytail: CLI emits remoteSteerable:false, so check the value, not mere
+        // presence (a presence check misclassifies the CLI as the App).
+        isApp = d.remoteSteerable === true;
+        if (d.context && typeof d.context.cwd === "string") cwd = d.context.cwd;
+        if (typeof d.selectedModel === "string") selectedModel = d.selectedModel;
+        if (typeof d.startTime === "string") startTime = d.startTime;
+        break;
+      case "session.model_change":
+        if (typeof d.newModel === "string" && d.newModel) lastChange = d.newModel;
+        break;
+      case "assistant.message":
+        if (!firstAssistant && typeof d.model === "string" && d.model) firstAssistant = d.model;
+        break;
+      case "session.shutdown":
+        if (!firstMetric && d.modelMetrics && typeof d.modelMetrics === "object") {
+          const keys = Object.keys(d.modelMetrics);
+          if (keys.length) firstMetric = keys[0];
+        }
+        break;
+    }
+  }
+  // A literal "auto" routing token resolves to the model that actually ran (from
+  // assistant.message / modelMetrics) and is flagged viaAuto; a concrete pin is used
+  // as-is. An empty token also resolves from events but is NOT "via Auto".
+  const raw = lastChange || selectedModel || "";
+  let model;
+  let viaAuto;
+  if (raw && raw !== "auto") {
+    model = raw;
+    viaAuto = false;
+  } else {
+    model = firstAssistant || firstMetric || "(unknown)";
+    viaAuto = raw === "auto";
+  }
+  const startMs = startTime ? toMs(startTime) : NaN;
+  const ts = Number.isFinite(startMs) ? startMs : firstTs;
+  if (!Number.isFinite(ts)) return null;
+  return {
+    ts,
+    model: normalizeModel(model),
+    cwd,
+    harness: isApp ? "copilot-app" : "copilot-cli",
+    viaAuto,
+  };
+}
+
+function copilotActivity(minMs) {
+  let entries;
+  try {
+    entries = fs.readdirSync(copilotStateDir(), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const cutoff = staleCutoff(minMs);
+  const rows = [];
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    const file = path.join(copilotStateDir(), ent.name, "events.jsonl");
+    let st;
+    try {
+      st = fs.statSync(file);
+    } catch {
+      continue;
+    }
+    if (st.mtimeMs < cutoff) {
+      copilotCache.delete(ent.name);
+      continue;
+    }
+    const cached = copilotCache.get(ent.name);
+    if (cached && cached.mtimeMs === st.mtimeMs) {
+      if (cached.row) rows.push(cached.row);
+      continue;
+    }
+    const row = parseCopilotSession(file);
+    copilotCache.set(ent.name, { mtimeMs: st.mtimeMs, row });
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+// --- Codex CLI: ~/.codex/sessions/**/rollout-*.jsonl (state_5.sqlite fallback) ---
+const codexCache = new Map();
+
+function parseCodexRollout(file) {
+  let text;
+  try {
+    text = readHead(file);
+  } catch {
+    return null;
+  }
+  let cwd = "";
+  let model = "";
+  let ts = null;
+  for (const l of text.split("\n")) {
+    if (!l || !l.includes('"type"')) continue;
+    let o;
+    try {
+      o = JSON.parse(l);
+    } catch {
+      continue; // last line in a head read is often truncated
+    }
+    const p = o.payload || {};
+    if (ts == null && o.timestamp) {
+      const t = toMs(o.timestamp);
+      if (Number.isFinite(t)) ts = t;
+    }
+    if (o.type === "session_meta" && typeof p.cwd === "string") cwd = p.cwd;
+    else if (o.type === "turn_context" && !model && typeof p.model === "string") model = p.model;
+    if (cwd && model) break;
+  }
+  if (!Number.isFinite(ts)) return null;
+  return { ts, model: normalizeModel(model), cwd, harness: "codex", viaAuto: false };
+}
+
+function codexActivityFromDb() {
+  try {
+    return qDb(
+      codexDbPath(),
+      `SELECT strftime('%Y-%m-%dT%H:%M:%S', created_at, 'unixepoch') ts,
+              COALESCE(NULLIF(model,''),'(unknown)') model, cwd
+       FROM threads WHERE model IS NOT NULL`
+    )
+      .map((r) => ({
+        ts: toMs(r.ts),
+        model: normalizeModel(r.model),
+        cwd: r.cwd || "",
+        harness: "codex",
+        viaAuto: false,
+      }))
+      .filter((r) => Number.isFinite(r.ts));
+  } catch {
+    return [];
+  }
+}
+
+function codexActivity(minMs) {
+  const dirs = codexSessionsDirs();
+  if (!dirs.length) return codexActivityFromDb();
+  const cutoff = staleCutoff(minMs);
+  const rows = [];
+  for (const dir of dirs) {
+    let files;
+    try {
+      files = jsonlFiles(dir);
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      let st;
+      try {
+        st = fs.statSync(file);
+      } catch {
+        continue;
+      }
+      if (st.mtimeMs < cutoff) {
+        codexCache.delete(file);
+        continue;
+      }
+      const cached = codexCache.get(file);
+      if (cached && cached.mtimeMs === st.mtimeMs) {
+        if (cached.row) rows.push(cached.row);
+        continue;
+      }
+      const row = parseCodexRollout(file);
+      codexCache.set(file, { mtimeMs: st.mtimeMs, row });
+      if (row) rows.push(row);
+    }
+  }
+  return rows;
+}
+
+// --- Claude Code: ~/.claude/projects/**/*.jsonl ---
+const claudeCache = new Map();
 
 function parseClaudeFile(file, st) {
   const cached = claudeCache.get(file);
@@ -304,9 +377,10 @@ function parseClaudeFile(file, st) {
       if (o.type === "assistant" && o.message && o.message.model) {
         records.push({
           ts: toMs(o.timestamp),
-          model: o.message.model,
+          model: normalizeModel(o.message.model),
+          cwd: o.cwd || "",
           harness: "claude",
-          cwd: o.cwd,
+          viaAuto: false,
         });
       }
     } catch {
@@ -314,11 +388,7 @@ function parseClaudeFile(file, st) {
     }
   }
   const filtered = records.filter((r) => Number.isFinite(r.ts));
-  claudeCache.set(file, {
-    mtimeMs: st.mtimeMs,
-    size: st.size,
-    records: filtered,
-  });
+  claudeCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, records: filtered });
   return filtered;
 }
 
@@ -326,10 +396,11 @@ function claudeActivity(minMs) {
   try {
     const dir = claudeDir();
     if (!fs.existsSync(dir)) return [];
+    const cutoff = staleCutoff(minMs);
     const rows = [];
     for (const file of jsonlFiles(dir)) {
       const st = fs.statSync(file);
-      if (st.mtimeMs < minMs) {
+      if (st.mtimeMs < cutoff) {
         claudeCache.delete(file);
         continue;
       }
@@ -341,22 +412,105 @@ function claudeActivity(minMs) {
   }
 }
 
+// --- OpenCode: ~/.local/share/opencode/storage ---
+const opencodeCache = new Map();
+
+function parseOpencodeSession(storage, sessionFile) {
+  const s = readJsonSafe(sessionFile);
+  if (!s || !s.id) return null;
+  const cwd = typeof s.directory === "string" ? s.directory : "";
+  let ts = s.time && Number.isFinite(s.time.created) ? s.time.created : null;
+  let model = "";
+  let firstMsgTs = Infinity;
+  let msgs;
+  try {
+    msgs = fs.readdirSync(path.join(storage, "message", s.id)).filter((f) => f.endsWith(".json"));
+  } catch {
+    msgs = [];
+  }
+  for (const mf of msgs) {
+    const m = readJsonSafe(path.join(storage, "message", s.id, mf));
+    if (!m || m.role !== "assistant") continue;
+    const created = m.time && Number.isFinite(m.time.created) ? m.time.created : Infinity;
+    const mid = m.modelID || (m.model && m.model.modelID) || "";
+    if (mid && created < firstMsgTs) {
+      firstMsgTs = created;
+      model = mid;
+    }
+  }
+  if (ts == null && Number.isFinite(firstMsgTs)) ts = firstMsgTs;
+  if (!Number.isFinite(ts)) return null;
+  return { ts, model: normalizeModel(model), cwd, harness: "opencode", viaAuto: false };
+}
+
+function opencodeActivity(minMs) {
+  const storage = opencodeStorageDir();
+  const sessDir = path.join(storage, "session", "global");
+  let files;
+  try {
+    files = fs.readdirSync(sessDir).filter((f) => f.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const cutoff = staleCutoff(minMs);
+  const rows = [];
+  for (const f of files) {
+    const sf = path.join(sessDir, f);
+    let st;
+    try {
+      st = fs.statSync(sf);
+    } catch {
+      continue;
+    }
+    if (st.mtimeMs < cutoff) {
+      opencodeCache.delete(sf);
+      continue;
+    }
+    const cached = opencodeCache.get(sf);
+    if (cached && cached.mtimeMs === st.mtimeMs) {
+      if (cached.row) rows.push(cached.row);
+      continue;
+    }
+    const row = parseOpencodeSession(storage, sf);
+    opencodeCache.set(sf, { mtimeMs: st.mtimeMs, row });
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
 function modelActivity(minMs = 0) {
   return [
-    ...copilotActivity(),
-    ...codexActivity(),
+    ...copilotActivity(minMs),
+    ...codexActivity(minMs),
     ...claudeActivity(minMs),
+    ...opencodeActivity(minMs),
   ]
     .filter((r) => Number.isFinite(r.ts))
     .sort((a, b) => a.ts - b.ts);
 }
 
-// Display/aggregation key: Auto-routed models are kept distinct from pinned ones,
-// so "claude-sonnet-4.6 (via Auto)" never merges with a directly-chosen "claude-sonnet-4.6".
+// ---------------------------------------------------------------------------
+// Attribution: match each rtk command to the active harness session.
+// ---------------------------------------------------------------------------
+// Display/aggregation key: Auto-routed models stay distinct from pinned ones, so
+// "claude-sonnet-4.6 (via Auto)" never merges with a directly-chosen one.
 function modelKey(model, viaAuto) {
   return viaAuto ? `${model} (via Auto)` : model;
 }
 
+// True when two filesystem paths refer to the same workspace (equal, or one nested
+// in the other). ponytail: prefix match, not git-root aware — fine for attribution.
+function cwdMatch(cwd, projectPath) {
+  if (!cwd || !projectPath) return false;
+  const a = cwd.replace(/\/+$/, "");
+  const b = projectPath.replace(/\/+$/, "");
+  return a === b || a.startsWith(b + "/") || b.startsWith(a + "/");
+}
+
+// For each command, among the activity events within MAX_GAP_MS *before* it, prefer
+// the one whose cwd matches the command's project_path; otherwise the nearest in
+// time. The command's workspace becomes the matched session's real cwd (cleaner than
+// rtk's own project_path), falling back to project_path, then "(unknown)".
 function attribute(commands, activity) {
   const tss = activity.map((a) => a.ts);
   for (const cmd of commands) {
@@ -364,7 +518,7 @@ function attribute(commands, activity) {
     let hi = tss.length - 1;
     let i = -1;
     while (lo <= hi) {
-      const mid = Math.floor((lo + hi) / 2);
+      const mid = (lo + hi) >> 1;
       if (tss[mid] <= cmd.ts) {
         i = mid;
         lo = mid + 1;
@@ -372,34 +526,58 @@ function attribute(commands, activity) {
         hi = mid - 1;
       }
     }
-    const a = i >= 0 ? activity[i] : null;
-    const gapMs = a ? cmd.ts - a.ts : Infinity;
-    if (!a || gapMs > MAX_GAP_MS) {
+    let best = null;
+    let bestGap = Infinity;
+    for (let j = i; j >= 0; j--) {
+      const gap = cmd.ts - activity[j].ts;
+      if (gap > MAX_GAP_MS) break; // activity is sorted asc → older only widens the gap
+      if (!best) {
+        best = activity[j];
+        bestGap = gap;
+      }
+      if (cwdMatch(activity[j].cwd, cmd.project_path)) {
+        best = activity[j];
+        bestGap = gap;
+        break; // nearest cwd match wins
+      }
+    }
+    if (!best) {
       cmd.model = "(unknown)";
       cmd.harness = "(unknown)";
       cmd.viaAuto = false;
       cmd.gapMs = null;
+      cmd.workspace = cmd.project_path || "(unknown)";
     } else {
-      cmd.model = modelKey(a.model, a.viaAuto);
-      cmd.harness = a.harness;
-      cmd.viaAuto = !!a.viaAuto;
-      cmd.gapMs = gapMs;
+      cmd.model = modelKey(best.model, best.viaAuto);
+      cmd.harness = best.harness;
+      cmd.viaAuto = !!best.viaAuto;
+      cmd.gapMs = bestGap;
+      cmd.workspace = best.cwd && best.cwd.trim() ? best.cwd : cmd.project_path || "(unknown)";
     }
   }
   return commands;
 }
 
-function commandRows(projects) {
-  const w = whereProjects(projects);
+// ---------------------------------------------------------------------------
+// Single source of truth: every rtk command, attributed. All dashboard
+// aggregations are derived from this array (workspace is the project axis).
+// ---------------------------------------------------------------------------
+function commandRows() {
   return q(
-    `SELECT timestamp, saved_tokens, input_tokens, project_path
-     FROM commands${w}`
+    `SELECT id, timestamp, saved_tokens, input_tokens, output_tokens,
+            savings_pct, exec_time_ms, rtk_cmd, project_path
+     FROM commands`
   ).map((r) => ({
+    id: r.id,
     timestamp: r.timestamp,
     ts: toMs(r.timestamp),
     saved: r.saved_tokens || 0,
     input: r.input_tokens || 0,
-    project_path: r.project_path,
+    output: r.output_tokens || 0,
+    time_ms: r.exec_time_ms || 0,
+    savings_pct: r.savings_pct || 0,
+    rtk_cmd: r.rtk_cmd || "",
+    project_path: r.project_path || "",
   }));
 }
 
@@ -411,9 +589,159 @@ function minCommandMs(rows) {
   return minMs === Infinity ? Date.now() : minMs;
 }
 
-function attributedCommands(projects) {
-  const rows = commandRows(projects);
+function attributedAll() {
+  const rows = commandRows();
   return attribute(rows, modelActivity(minCommandMs(rows)));
+}
+
+function filterByWorkspace(rows, projects) {
+  if (!Array.isArray(projects) || !projects.length) return rows;
+  const set = new Set(projects);
+  return rows.filter((r) => set.has(r.workspace));
+}
+
+function getProjects(rows) {
+  const r = rows || attributedAll();
+  return [...new Set(r.map((x) => x.workspace).filter((w) => w && w !== "(unknown)"))].sort();
+}
+
+// ---------------------------------------------------------------------------
+// Aggregations (all operate on an attributed, workspace-filtered command array)
+// ---------------------------------------------------------------------------
+function summarize(rows) {
+  let input = 0;
+  let output = 0;
+  let saved = 0;
+  let time_ms = 0;
+  let since = null;
+  let sinceMs = Infinity;
+  for (const r of rows) {
+    input += r.input;
+    output += r.output;
+    saved += r.saved;
+    time_ms += r.time_ms;
+    if (Number.isFinite(r.ts) && r.ts < sinceMs) {
+      sinceMs = r.ts;
+      since = r.timestamp;
+    }
+  }
+  return {
+    commands: rows.length,
+    input,
+    output,
+    saved,
+    // ponytail: overall ratio (matches `rtk gain`), not the mean of per-row pct.
+    pct: input > 0 ? (saved / input) * 100 : 0,
+    time_ms,
+    since,
+  };
+}
+
+function summary(projects) {
+  const list = Array.isArray(projects) ? projects : [];
+  // Empty filter → pure command totals (no harness file reads): keeps the tray cheap.
+  if (!list.length) return summarize(commandRows());
+  return summarize(filterByWorkspace(attributedAll(), list));
+}
+
+function sqliteWeekPeriod(ms) {
+  if (!Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  const year = d.getFullYear();
+  const yday = Math.floor(
+    (new Date(year, d.getMonth(), d.getDate()) - new Date(year, 0, 1)) / 86400000
+  );
+  const mondayDay = (d.getDay() + 6) % 7;
+  const week = Math.floor((yday + 7 - mondayDay) / 7);
+  return `${year}-W${String(week).padStart(2, "0")}`;
+}
+
+function periodFor(bucket, r) {
+  const d = new Date(r.ts);
+  if (bucket === "monthly")
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  if (bucket === "weekly") return sqliteWeekPeriod(r.ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function timeseries(bucket, rows) {
+  const g = new Map();
+  for (const r of rows) {
+    if (!Number.isFinite(r.ts)) continue;
+    const period = periodFor(bucket, r);
+    const m = g.get(period) || { period, saved: 0, input: 0, commands: 0 };
+    m.saved += r.saved;
+    m.input += r.input;
+    m.commands += 1;
+    g.set(period, m);
+  }
+  return [...g.values()].sort((a, b) => a.period.localeCompare(b.period));
+}
+
+// per-workspace breakdown per bucket, for stacked bars. `project` carries the full
+// cwd path; the renderer displays its basename.
+function timeseriesByProject(bucket, rows) {
+  const g = new Map();
+  for (const r of rows) {
+    if (!Number.isFinite(r.ts)) continue;
+    const period = periodFor(bucket, r);
+    const ws = r.workspace || "";
+    const key = `${period}\n${ws}`;
+    const m = g.get(key) || { period, project: ws, saved: 0 };
+    m.saved += r.saved;
+    g.set(key, m);
+  }
+  return [...g.values()]
+    .filter((r) => r.saved !== 0)
+    .sort((a, b) => a.period.localeCompare(b.period));
+}
+
+function timeseriesByModel(bucket, rows) {
+  const g = new Map();
+  for (const r of rows) {
+    if (!Number.isFinite(r.ts)) continue;
+    const period = periodFor(bucket, r);
+    const model = r.model || "(unknown)";
+    const key = `${period}\n${model}`;
+    const m = g.get(key) || { period, model, saved: 0 };
+    m.saved += r.saved;
+    g.set(key, m);
+  }
+  return [...g.values()]
+    .filter((r) => r.saved !== 0)
+    .sort((a, b) => a.period.localeCompare(b.period) || a.model.localeCompare(b.model));
+}
+
+// Normalize "rtk read /some/file" -> "rtk read". ponytail: naive first-two-token
+// grouping; widen if commands need finer buckets.
+function normalizeCmd(cmd) {
+  const parts = cmd.trim().split(/\s+/);
+  return parts.slice(0, 2).join(" ") || cmd;
+}
+
+function byCommand(rows, limit = 15) {
+  const merged = new Map();
+  for (const r of rows) {
+    const key = normalizeCmd(r.rtk_cmd || "");
+    const m = merged.get(key) || { command: key, n: 0, saved: 0, input: 0 };
+    m.n += 1;
+    m.saved += r.saved;
+    m.input += r.input;
+    merged.set(key, m);
+  }
+  return [...merged.values()].sort((a, b) => b.saved - a.saved).slice(0, limit);
+}
+
+function recent(rows, limit = 50) {
+  return [...rows]
+    .sort((a, b) => (b.id || 0) - (a.id || 0))
+    .slice(0, Number(limit) || 50)
+    .map((r) => ({
+      timestamp: r.timestamp,
+      rtk_cmd: r.rtk_cmd,
+      saved_tokens: r.saved,
+      savings_pct: r.savings_pct,
+    }));
 }
 
 function groupedAttributed(rows, key) {
@@ -431,87 +759,60 @@ function groupedAttributed(rows, key) {
     .sort((a, b) => b.saved - a.saved);
 }
 
-function byModel(projects, rows) {
-  return groupedAttributed(rows || attributedCommands(projects), "model");
+function byModel(rows) {
+  return groupedAttributed(rows || attributedAll(), "model");
 }
 
-function byHarness(projects, rows) {
-  return groupedAttributed(rows || attributedCommands(projects), "harness");
-}
-
-function sqliteWeekPeriod(ms) {
-  if (!Number.isFinite(ms)) return "";
-  const d = new Date(ms);
-  const year = d.getFullYear();
-  const yday = Math.floor(
-    (new Date(year, d.getMonth(), d.getDate()) - new Date(year, 0, 1)) /
-      86400000
-  );
-  const mondayDay = (d.getDay() + 6) % 7;
-  const week = Math.floor((yday + 7 - mondayDay) / 7);
-  return `${year}-W${String(week).padStart(2, "0")}`;
-}
-
-function periodFor(bucket, r) {
-  const d = new Date(r.ts);
-  if (bucket === "monthly")
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-  if (bucket === "weekly") return sqliteWeekPeriod(r.ts);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function timeseriesByModel(bucket, projects, rows) {
-  const grouped = new Map();
-  for (const r of rows || attributedCommands(projects)) {
-    const period = periodFor(bucket, r);
-    const key = `${period}\n${r.model || "(unknown)"}`;
-    const m = grouped.get(key) || {
-      period,
-      model: r.model || "(unknown)",
-      saved: 0,
-    };
-    m.saved += r.saved || 0;
-    grouped.set(key, m);
-  }
-  return [...grouped.values()]
-    .filter((r) => r.saved !== 0)
-    .sort(
-      (a, b) => a.period.localeCompare(b.period) || a.model.localeCompare(b.model)
-    );
+function byHarness(rows) {
+  return groupedAttributed(rows || attributedAll(), "harness");
 }
 
 function getAll(opts = {}) {
   const projects = Array.isArray(opts.projectPaths) ? opts.projectPaths : [];
-  const attributed = attributedCommands(projects);
+  const hideOutliers = !!opts.hideOutliers;
+  const all = attributedAll();
+  // An outlier is a single command whose saved tokens dwarf normal usage (a recursive
+  // grep over node_modules, a huge `ps`/log dump). Surfaced always so the dashboard can
+  // hint at it; excluded from every aggregation when the user opts to hide them.
+  const outlierRows = all.filter((r) => r.saved > OUTLIER_SAVED);
+  const kept = hideOutliers ? all.filter((r) => r.saved <= OUTLIER_SAVED) : all;
+  const rows = filterByWorkspace(kept, projects);
   return {
     available: dbExists(),
     projectPaths: projects,
-    projects: getProjects(),
-    summary: summary(projects),
+    projects: getProjects(kept),
+    outliers: {
+      threshold: OUTLIER_SAVED,
+      count: outlierRows.length,
+      saved: outlierRows.reduce((a, r) => a + r.saved, 0),
+      hidden: hideOutliers,
+    },
+    summary: summarize(rows),
     series: {
-      daily: timeseries("daily", projects),
-      weekly: timeseries("weekly", projects),
-      monthly: timeseries("monthly", projects),
+      daily: timeseries("daily", rows),
+      weekly: timeseries("weekly", rows),
+      monthly: timeseries("monthly", rows),
     },
     stacked: {
-      daily: timeseriesByProject("daily", projects),
-      weekly: timeseriesByProject("weekly", projects),
-      monthly: timeseriesByProject("monthly", projects),
+      daily: timeseriesByProject("daily", rows),
+      weekly: timeseriesByProject("weekly", rows),
+      monthly: timeseriesByProject("monthly", rows),
     },
-    byModel: byModel(projects, attributed),
-    byHarness: byHarness(projects, attributed),
+    byModel: byModel(rows),
+    byHarness: byHarness(rows),
     stackedByModel: {
-      daily: timeseriesByModel("daily", projects, attributed),
-      weekly: timeseriesByModel("weekly", projects, attributed),
-      monthly: timeseriesByModel("monthly", projects, attributed),
+      daily: timeseriesByModel("daily", rows),
+      weekly: timeseriesByModel("weekly", rows),
+      monthly: timeseriesByModel("monthly", rows),
     },
     harnessesAvailable: {
-      copilot: fs.existsSync(copilotDbPath()),
+      copilot: fs.existsSync(copilotStateDir()),
       claude: fs.existsSync(claudeDir()),
-      codex: fs.existsSync(codexDbPath()),
+      codex: codexSessionsDirs().length > 0 || fs.existsSync(codexDbPath()),
+      opencode: fs.existsSync(opencodeStorageDir()),
     },
-    byCommand: byCommand(projects),
-    recent: recent(projects),
+    byCommand: byCommand(rows),
+    recent: recent(rows),
   };
 }
 
@@ -522,91 +823,86 @@ module.exports = {
   byModel,
   byHarness,
   modelActivity,
+  normalizeModel,
   DB,
   dbExists,
 };
 
 if (require.main === module) {
-  // self-check: the only non-trivial logic is the SQL/aggregation.
+  // self-check: the non-trivial logic is the activity extraction + attribution +
+  // aggregation. Asserts fail loudly if any invariant breaks.
   const all = getAll();
   const s = all.summary;
   console.log("db:", DB, "exists:", all.available);
-  console.log("since:", s.since, "commands:", s.commands);
   console.log(
-    "saved:",
-    s.saved,
-    "tokens  savings:",
-    s.pct.toFixed(1) + "%"
+    "since:", s.since, "commands:", s.commands,
+    "saved:", s.saved, "savings:", s.pct.toFixed(1) + "%"
   );
-  console.log("projects:", all.projects.length, "top cmd:", all.byCommand[0]);
+  console.log("workspaces:", all.projects.length);
+  console.log("by-harness:", all.byHarness.map((r) => `${r.harness}:${r.saved}`).join(", "));
+  console.log("by-model:", all.byModel.slice(0, 6).map((r) => `${r.model}:${r.saved}`).join(", "));
+
   console.assert(s.saved >= 0 && s.commands >= 0, "non-negative totals");
-  console.assert(
-    all.byCommand.reduce((a, c) => a + c.saved, 0) <= s.saved + 1,
-    "by-command saved <= total saved"
-  );
-  const stackTotal = all.stacked.daily.reduce((a, r) => a + r.saved, 0);
-  const dailyTotal = all.series.daily.reduce((a, r) => a + r.saved, 0);
-  console.assert(
-    Math.abs(stackTotal - dailyTotal) <= 1,
-    "stacked daily saved == series daily saved"
-  );
-  const byModelTotal = all.byModel.reduce((a, r) => a + r.saved, 0);
+
+  const wsDaily = all.stacked.daily.reduce((a, r) => a + r.saved, 0);
+  const seriesDaily = all.series.daily.reduce((a, r) => a + r.saved, 0);
+  console.assert(Math.abs(wsDaily - seriesDaily) <= 1, "stacked-by-workspace daily == series daily");
+
+  const modelDaily = all.stackedByModel.daily.reduce((a, r) => a + r.saved, 0);
+  console.assert(Math.abs(modelDaily - seriesDaily) <= 1, "stacked-by-model daily == series daily");
+
   const byHarnessTotal = all.byHarness.reduce((a, r) => a + r.saved, 0);
-  const modelDailyTotal = all.stackedByModel.daily.reduce(
-    (a, r) => a + r.saved,
-    0
+  const byModelTotal = all.byModel.reduce((a, r) => a + r.saved, 0);
+  console.assert(Math.abs(byHarnessTotal - s.saved) <= 1, "by-harness saved == total saved");
+  console.assert(Math.abs(byModelTotal - s.saved) <= 1, "by-model saved == total saved");
+
+  const knownHarness = new Set(["copilot-cli", "copilot-app", "claude", "codex", "opencode", "(unknown)"]);
+  console.assert(all.byHarness.every((r) => knownHarness.has(r.harness)), "harness values are known");
+  console.assert(all.byHarness.every((r) => r.harness !== "copilot"), "Copilot is split into CLI/App, not merged");
+
+  const act = modelActivity(0);
+  console.assert(act.every((a) => Number.isFinite(a.ts)), "activity timestamps are finite");
+  console.assert(act.every((a, i) => i === 0 || act[i - 1].ts <= a.ts), "activity sorted ascending");
+  console.assert(
+    act.every((a) => a.model === a.model.trim() && !a.model.startsWith("copilot/")),
+    "models are normalized"
   );
   console.assert(
-    Math.abs(byModelTotal - s.saved) <= 1,
-    "by-model saved == total saved"
+    act.every((a) => ["copilot-cli", "copilot-app", "claude", "codex", "opencode"].includes(a.harness)),
+    "activity harness values are known"
+  );
+
+  const attributed = attributedAll();
+  console.assert(
+    attributed.every((r) => typeof r.workspace === "string" && r.workspace.length > 0),
+    "every command has a workspace"
   );
   console.assert(
-    Math.abs(byHarnessTotal - s.saved) <= 1,
-    "by-harness saved == total saved"
-  );
-  console.assert(
-    Math.abs(modelDailyTotal - dailyTotal) <= 1,
-    "stacked model daily saved == series daily saved"
-  );
-  const activity = modelActivity(0);
-  console.assert(
-    activity.every((a) => Number.isFinite(a.ts)),
-    "activity timestamps are finite"
-  );
-  console.assert(
-    activity.every((a, i) => i === 0 || activity[i - 1].ts <= a.ts),
-    "activity sorted ascending"
-  );
-  const rows = commandRows();
-  const reattributed = attribute(rows, modelActivity(minCommandMs(rows)));
-  console.assert(
-    reattributed.every((r) => r.gapMs == null || r.gapMs <= MAX_GAP_MS),
+    attributed.every((r) => r.gapMs == null || r.gapMs <= MAX_GAP_MS),
     "attributed commands stay within max gap"
   );
-  console.log(
-    "by-model:",
-    all.byModel
-      .slice(0, 5)
-      .map((r) => `${r.model}:${r.saved}`)
-      .join(", ")
+
+  console.assert(
+    Array.isArray(copilotActivity(0)) &&
+      Array.isArray(codexActivity(0)) &&
+      Array.isArray(claudeActivity(0)) &&
+      Array.isArray(opencodeActivity(0)),
+    "collectors return arrays even when a source is absent"
   );
-  console.log(
-    "by-harness:",
-    all.byHarness.map((r) => `${r.harness}:${r.saved}`).join(", ")
-  );
+
   if (all.projects[0]) {
-    const ps = summary([all.projects[0]]);
-    console.assert(
-      ps.saved <= s.saved + 1,
-      "single project saved <= global saved"
-    );
-    if (all.projects[1]) {
-      const two = summary([all.projects[0], all.projects[1]]);
-      console.assert(
-        two.saved >= ps.saved && two.saved <= s.saved + 1,
-        "two projects saved between one and global"
-      );
-    }
+    const one = summary([all.projects[0]]);
+    console.assert(one.saved <= s.saved + 1, "single workspace saved <= global saved");
   }
+
+  const hidden = getAll({ hideOutliers: true });
+  console.assert(hidden.summary.saved <= s.saved, "hiding outliers never increases saved");
+  console.assert(hidden.outliers.hidden === true, "outliers flagged as hidden");
+  const outlierSaved = attributed.filter((r) => r.saved > OUTLIER_SAVED).reduce((a, r) => a + r.saved, 0);
+  console.assert(
+    Math.abs(s.saved - hidden.summary.saved - outlierSaved) <= 1,
+    "hidden total == full total minus outlier saved"
+  );
+  console.log("outliers:", all.outliers.count, "accounting for", all.outliers.saved, "saved");
   console.log("self-check ok");
 }

@@ -93,6 +93,9 @@
   .drp-footer{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);font-size:12px;color:var(--muted)}
   .cal-clear{background:transparent;border:0;color:var(--accent);padding:2px 0;font-size:12px;cursor:pointer}
   .cal-clear:hover{text-decoration:underline}
+.otoggle{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#8b949e;cursor:pointer;user-select:none;white-space:nowrap}
+.otoggle input{accent-color:#2f81f7;cursor:pointer}
+.onote{font-size:11px;color:#8b949e;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -108,6 +111,10 @@
     </summary>
     <div class="scopemenu" id="scopeMenu"></div>
   </details>
+  <label class="otoggle" id="otoggle" title="Exclude single commands that saved more than 1M tokens (e.g. a recursive grep over node_modules) from every chart and total">
+    <input type="checkbox" id="hideOutliers"> Hide outliers
+  </label>
+  <span class="sub onote" id="outlierNote"></span>
   <button id="refresh"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg></span><span class="lbl">Refresh</span></button>
 </header>
 <div class="wrap">
@@ -177,6 +184,7 @@ const humanTime = ms => { const s=Math.round((ms||0)/1000); if(s<60) return s+"s
 let bucket = "daily";
 let tsMode = "total";   // "total" | "project" | "model"
 let scopeSel = [];   // selected project paths; empty = all
+let hideOutliers = false;   // exclude single commands saving > threshold (server-side)
 let lastProjects = null;
 let data = null;
 let tsChart = null, cmdChart = null, modelChart = null, harnessChart = null;
@@ -321,7 +329,7 @@ function drawCmd(){
 }
 
 function modelLabel(m){ return m || "(unknown)"; }
-function harnessLabel(h){ return h==="copilot" ? "Copilot" : h==="claude" ? "Claude Code" : h==="codex" ? "Codex" : "Unknown"; }
+function harnessLabel(h){ return ({"copilot-cli":"GitHub Copilot CLI","copilot-app":"GitHub Copilot App","claude":"Claude Code","codex":"Codex","opencode":"OpenCode"})[h] || "Unknown"; }
 function isUnknown(v){ return !v || v === "(unknown)"; }
 function ensureBarCanvas(wrap, id, n){
   const h = Math.max(100, n*24 + 28);
@@ -414,9 +422,21 @@ function updateScopeSummary(){
     n===1 ? (scopeSel[0].replace(/^.*\//,"")||scopeSel[0]) : (n+" projects");
 }
 
+function updateOutlierNote(){
+  const el = $("#outlierNote");
+  if(!el) return;
+  const o = (data && data.outliers) || { count:0, saved:0, hidden:false };
+  if(!o.count){ el.textContent = ""; el.title = ""; return; }
+  const plural = o.count===1 ? "" : "s";
+  el.textContent = (o.hidden ? "hiding " : "incl. ") + o.count + " outlier"+plural+" · "+humanK(o.saved);
+  el.title = o.count+" command"+plural+" saved more than "+humanK(o.threshold||0)+" tokens each"+
+    (o.hidden ? " (excluded)" : " — tick \u201cHide outliers\u201d to exclude");
+}
+
 function render(){
   const s = data.summary||{};
   cards(s);
+  updateOutlierNote();
   fillScope();
   drawTs();
   drawCmd();
@@ -432,7 +452,7 @@ function render(){
 
 async function load(){
   try{
-    data = await window.rtk.getStats({ projectPaths: scopeSel });
+    data = await window.rtk.getStats({ projectPaths: scopeSel, hideOutliers });
     render();
   }catch(e){ $("#meta").textContent = "error: "+e.message; }
 }
@@ -477,6 +497,11 @@ $("#scopeMenu").addEventListener("change", e=>{
   if(e.target.checked){ if(!scopeSel.includes(v)) scopeSel.push(v); }
   else { scopeSel = scopeSel.filter(x=>x!==v); }
   updateScopeSummary();
+  load();
+});
+
+$("#hideOutliers").addEventListener("change", e=>{
+  hideOutliers = e.target.checked;
   load();
 });
 
