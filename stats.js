@@ -637,11 +637,21 @@ function summarize(rows) {
   };
 }
 
+// caveman output savings have no workspace axis, so they're always the global
+// total regardless of the project filter.
+function withCaveman(base, cav) {
+  base.outputSaved = cav.outputSaved;
+  base.totalSaved = base.saved + cav.outputSaved;
+  return base;
+}
+
 function summary(projects) {
   const list = Array.isArray(projects) ? projects : [];
   // Empty filter → pure command totals (no harness file reads): keeps the tray cheap.
-  if (!list.length) return summarize(commandRows());
-  return summarize(filterByWorkspace(attributedAll(), list));
+  const base = !list.length
+    ? summarize(commandRows())
+    : summarize(filterByWorkspace(attributedAll(), list));
+  return withCaveman(base, cavemanActivity());
 }
 
 function sqliteWeekPeriod(ms) {
@@ -767,6 +777,94 @@ function byHarness(rows) {
   return groupedAttributed(rows || attributedAll(), "harness");
 }
 
+// ---------------------------------------------------------------------------
+// caveman: output-token savings (separate dataset from rtk's per-command input
+// savings). caveman maintains its own lifetime log; we only read + roll it up.
+// ---------------------------------------------------------------------------
+function cavemanHistoryPath() {
+  if (process.env.CAVEMAN_HISTORY) return process.env.CAVEMAN_HISTORY;
+  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
+  return path.join(dir, ".caveman-history.jsonl");
+}
+
+// Read caveman's lifetime savings log. Each line is one /caveman-stats snapshot:
+// {ts, session_id, mode, model, output_tokens, est_saved_tokens, est_saved_usd}.
+// Dedup to the latest snapshot per session_id (matches caveman's own aggregation),
+// then roll up output-token savings by period and model. Missing file -> zeros.
+// ponytail: plain read + JSON.parse per line, no deps; tolerant of partial lines.
+function cavemanActivity() {
+  const empty = {
+    sessions: 0,
+    outputTokens: 0,
+    outputSaved: 0,
+    byPeriod: { daily: [], weekly: [], monthly: [] },
+    byModel: [],
+  };
+  let raw;
+  try {
+    raw = fs.readFileSync(cavemanHistoryPath(), "utf8");
+  } catch {
+    return empty;
+  }
+
+  const latest = new Map();
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!e || typeof e !== "object") continue;
+    const id = e.session_id || "_";
+    const prev = latest.get(id);
+    if (!prev || (e.ts || 0) >= (prev.ts || 0)) latest.set(id, e);
+  }
+
+  const entries = [...latest.values()];
+  let outputTokens = 0;
+  let outputSaved = 0;
+  const periodMaps = { daily: new Map(), weekly: new Map(), monthly: new Map() };
+  const modelMap = new Map();
+  for (const e of entries) {
+    const saved = e.est_saved_tokens || 0;
+    outputTokens += e.output_tokens || 0;
+    outputSaved += saved;
+    const ts = e.ts || 0;
+    if (Number.isFinite(ts) && ts > 0 && saved) {
+      for (const bucket of ["daily", "weekly", "monthly"]) {
+        const period = periodFor(bucket, { ts });
+        const m = periodMaps[bucket];
+        m.set(period, (m.get(period) || 0) + saved);
+      }
+    }
+    if (saved) {
+      const model = normalizeModel(e.model) || "(unknown)";
+      modelMap.set(model, (modelMap.get(model) || 0) + saved);
+    }
+  }
+
+  const toSeries = (m) =>
+    [...m.entries()]
+      .map(([period, saved]) => ({ period, saved }))
+      .sort((a, b) => a.period.localeCompare(b.period));
+
+  return {
+    sessions: entries.length,
+    outputTokens,
+    outputSaved,
+    byPeriod: {
+      daily: toSeries(periodMaps.daily),
+      weekly: toSeries(periodMaps.weekly),
+      monthly: toSeries(periodMaps.monthly),
+    },
+    byModel: [...modelMap.entries()]
+      .map(([model, saved]) => ({ model, saved }))
+      .sort((a, b) => b.saved - a.saved),
+  };
+}
+
 function getAll(opts = {}) {
   const projects = Array.isArray(opts.projectPaths) ? opts.projectPaths : [];
   const hideOutliers = !!opts.hideOutliers;
@@ -777,6 +875,7 @@ function getAll(opts = {}) {
   const outlierRows = all.filter((r) => r.saved > OUTLIER_SAVED);
   const kept = hideOutliers ? all.filter((r) => r.saved <= OUTLIER_SAVED) : all;
   const rows = filterByWorkspace(kept, projects);
+  const cav = cavemanActivity();
   return {
     available: dbExists(),
     projectPaths: projects,
@@ -787,7 +886,8 @@ function getAll(opts = {}) {
       saved: outlierRows.reduce((a, r) => a + r.saved, 0),
       hidden: hideOutliers,
     },
-    summary: summarize(rows),
+    summary: withCaveman(summarize(rows), cav),
+    caveman: cav,
     series: {
       daily: timeseries("daily", rows),
       weekly: timeseries("weekly", rows),
@@ -822,6 +922,7 @@ module.exports = {
   getProjects,
   byModel,
   byHarness,
+  cavemanActivity,
   modelActivity,
   normalizeModel,
   DB,
@@ -904,5 +1005,36 @@ if (require.main === module) {
     "hidden total == full total minus outlier saved"
   );
   console.log("outliers:", all.outliers.count, "accounting for", all.outliers.saved, "saved");
+
+  // caveman output-savings: synthetic log → assert dedup + rollup invariants.
+  {
+    const tmp = path.join(os.tmpdir(), `caveman-selfcheck-${process.pid}.jsonl`);
+    const synthetic = [
+      { ts: Date.parse("2025-01-01T10:00:00Z"), session_id: "a", model: "claude-sonnet-4-20250514", output_tokens: 100, est_saved_tokens: 50 },
+      { ts: Date.parse("2025-01-01T11:00:00Z"), session_id: "a", model: "claude-sonnet-4-20250514", output_tokens: 200, est_saved_tokens: 120 },
+      { ts: Date.parse("2025-01-02T09:00:00Z"), session_id: "b", model: "claude-opus-4-1", output_tokens: 80, est_saved_tokens: 40 },
+    ].map((o) => JSON.stringify(o)).join("\n");
+    fs.writeFileSync(tmp, synthetic);
+    const prevEnv = process.env.CAVEMAN_HISTORY;
+    process.env.CAVEMAN_HISTORY = tmp;
+    const cav = cavemanActivity();
+    if (prevEnv === undefined) delete process.env.CAVEMAN_HISTORY;
+    else process.env.CAVEMAN_HISTORY = prevEnv;
+    fs.unlinkSync(tmp);
+
+    console.assert(cav.sessions === 2, "caveman dedup → latest snapshot per session_id");
+    console.assert(cav.outputSaved === 160, "caveman outputSaved == 120 + 40");
+    const cavDaily = cav.byPeriod.daily.reduce((a, r) => a + r.saved, 0);
+    console.assert(cavDaily === cav.outputSaved, "caveman byPeriod daily == outputSaved");
+    const cavModel = cav.byModel.reduce((a, r) => a + r.saved, 0);
+    console.assert(cavModel === cav.outputSaved, "caveman byModel == outputSaved");
+    console.assert(cav.byModel.some((r) => r.model === "claude-sonnet-4"), "caveman model ids normalized");
+  }
+
+  const totalSafe = summary([]);
+  console.assert(
+    totalSafe.totalSaved >= totalSafe.saved && totalSafe.outputSaved >= 0,
+    "totalSaved == rtk input saved + caveman output saved"
+  );
   console.log("self-check ok");
 }

@@ -192,9 +192,12 @@ let tsChart = null, cmdChart = null, modelChart = null, harnessChart = null;
 const $ = s => document.querySelector(s);
 
 function cards(s){
+  const out = s.outputSaved||0;
   const items = [
-    ["Tokens saved", humanK(s.saved), true],
-    ["Savings", (s.pct||0).toFixed(1)+"%", true],
+    ["Total saved", humanK(s.totalSaved!=null ? s.totalSaved : s.saved), true],
+    ["Input saved (rtk)", humanK(s.saved), true],
+    ["Output saved (caveman)", humanK(out), true],
+    ["Savings", (s.pct||0).toFixed(1)+"%", false],
     ["Commands optimized", fmt(s.commands), false],
     ["Input tokens", humanK(s.input), false],
     ["Output tokens", humanK(s.output), false],
@@ -216,6 +219,15 @@ function ensureCanvas(){ if(!$("#tsChart")) $("#tsWrap").innerHTML = '<canvas id
 function tsSeries(){
   if(bucket !== "custom") return (data.series && data.series[bucket]) || [];
   const daily = (data.series && data.series.daily) || [];
+  const from = $("#from").value, to = $("#to").value;
+  return daily.filter(p => (!from || p.period >= from) && (!to || p.period <= to));
+}
+
+// caveman output-saved per period for the active bucket (custom → range-filtered daily).
+function cavSeries(){
+  const bp = (data.caveman && data.caveman.byPeriod) || {};
+  if(bucket !== "custom") return bp[bucket] || [];
+  const daily = bp.daily || [];
   const from = $("#from").value, to = $("#to").value;
   return daily.filter(p => (!from || p.period >= from) && (!to || p.period <= to));
 }
@@ -261,19 +273,27 @@ function drawTs(){
   if(tsMode === "project") return drawTsProject();
   if(tsMode === "model") return drawTsModel();
   const series = tsSeries();
-  if(!series.length){ $("#tsWrap").innerHTML = '<div class="empty">No history in range.</div>'; return; }
+  const cav = cavSeries();
+  if(!series.length && !cav.length){ $("#tsWrap").innerHTML = '<div class="empty">No history in range.</div>'; return; }
   ensureCanvas();
-  let cum=0; const cumData = series.map(p=> (cum += p.saved||0));
+  const periods = [...new Set([...series.map(p=>p.period), ...cav.map(p=>p.period)])].sort();
+  const rtkMap = new Map(series.map(p=>[p.period, p.saved||0]));
+  const cavMap = new Map(cav.map(p=>[p.period, p.saved||0]));
+  const rtkData = periods.map(p=>rtkMap.get(p)||0);
+  const cavData = periods.map(p=>cavMap.get(p)||0);
+  let cum=0; const cumData = periods.map((p,i)=> (cum += rtkData[i]+cavData[i]));
+  const datasets = [
+    {type:"bar",label:"Input saved (rtk)",data:rtkData,backgroundColor:"#2f81f7cc",borderRadius:4,yAxisID:"y",stack:"s"},
+  ];
+  if(cav.length) datasets.push({type:"bar",label:"Output saved (caveman)",data:cavData,backgroundColor:"#a371f7cc",borderRadius:4,yAxisID:"y",stack:"s"});
+  datasets.push({type:"line",label:"Cumulative",data:cumData,borderColor:"#3fb950",backgroundColor:"#3fb950",tension:.3,pointRadius:2,yAxisID:"y1"});
   tsChart = new Chart($("#tsChart"), {
-    data:{ labels: series.map(p=>tsLabel(p.period)), datasets:[
-      {type:"bar",label:"Saved this "+SPAN[bucket],data:series.map(p=>p.saved||0),backgroundColor:"#2f81f7cc",borderRadius:4,yAxisID:"y"},
-      {type:"line",label:"Cumulative",data:cumData,borderColor:"#3fb950",backgroundColor:"#3fb950",tension:.3,pointRadius:2,yAxisID:"y1"},
-    ]},
+    data:{ labels: periods.map(tsLabel), datasets },
     options:{responsive:true,interaction:{mode:"index",intersect:false},
       plugins:{legend:{labels:{color:"#e6edf3"}},tooltip:{callbacks:{label:c=>c.dataset.label+": "+fmt(c.parsed.y)}}},
       scales:{
-        x:{ticks:{color:"#8b949e",maxRotation:0,autoSkip:true},grid:{color:"#21262d"}},
-        y:{position:"left",title:{display:true,text:"Saved per "+SPAN[bucket],color:"#2f81f7"},ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+        x:{stacked:true,ticks:{color:"#8b949e",maxRotation:0,autoSkip:true},grid:{color:"#21262d"}},
+        y:{stacked:true,position:"left",title:{display:true,text:"Saved per "+SPAN[bucket],color:"#2f81f7"},ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
         y1:{position:"right",title:{display:true,text:"Cumulative saved",color:"#3fb950"},ticks:{color:"#8b949e",callback:humanK},grid:{drawOnChartArea:false}},
       }}});
 }
@@ -290,7 +310,7 @@ function drawTsProject(){
         tooltip:{callbacks:{label:c=>c.dataset.label+": "+fmt(c.parsed.y)}}},
       scales:{
         x:{stacked:true,ticks:{color:"#8b949e",maxRotation:0,autoSkip:true},grid:{color:"#21262d"}},
-        y:{stacked:true,title:{display:true,text:"Saved per "+SPAN[bucket]+" (by project)",color:"#8b949e"},ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+        y:{stacked:true,title:{display:true,text:"Saved per "+SPAN[bucket]+" (by project · rtk input)",color:"#8b949e"},ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
       }}});
 }
 
@@ -306,7 +326,7 @@ function drawTsModel(){
         tooltip:{callbacks:{label:c=>c.dataset.label+": "+fmt(c.parsed.y)}}},
       scales:{
         x:{stacked:true,ticks:{color:"#8b949e",maxRotation:0,autoSkip:true},grid:{color:"#21262d"}},
-        y:{stacked:true,title:{display:true,text:"Saved per "+SPAN[bucket]+" (by model)",color:"#8b949e"},ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+        y:{stacked:true,title:{display:true,text:"Saved per "+SPAN[bucket]+" (by model · rtk input)",color:"#8b949e"},ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
       }}});
 }
 
@@ -338,23 +358,33 @@ function ensureBarCanvas(wrap, id, n){
 }
 
 function drawModel(){
-  const rows = data.byModel || [];
+  const rtkRows = data.byModel || [];
+  const cavRows = (data.caveman && data.caveman.byModel) || [];
   if(modelChart){ modelChart.destroy(); modelChart=null; }
-  if(!rows.length){ $("#modelWrap").innerHTML = '<div class="empty">No model data — is a supported harness installed?</div>'; $("#modelTable").innerHTML = ""; return; }
+  if(!rtkRows.length && !cavRows.length){ $("#modelWrap").innerHTML = '<div class="empty">No model data — is a supported harness installed?</div>'; $("#modelTable").innerHTML = ""; return; }
+  // Merge rtk input savings with caveman output savings by normalized model key.
+  const cavMap = new Map(cavRows.map(r=>[r.model, r.saved||0]));
+  const merged = new Map();
+  rtkRows.forEach(r=>merged.set(r.model, {model:r.model, saved:r.saved||0, output:cavMap.get(r.model)||0, cmds:r.cmds||0, input:r.input||0, pct:r.pct||0}));
+  cavRows.forEach(r=>{ if(!merged.has(r.model)) merged.set(r.model, {model:r.model, saved:0, output:r.saved||0, cmds:0, input:0, pct:0}); });
+  const rows = [...merged.values()].sort((a,b)=>(b.saved+b.output)-(a.saved+a.output));
+  const hasCav = cavRows.length > 0;
   ensureBarCanvas("#modelWrap", "modelChart", rows.length);
+  const datasets = [
+    {label:"Input saved (rtk)",data:rows.map(r=>r.saved||0),backgroundColor:rows.map((r,i)=>isUnknown(r.model)?"#8b949ecc":PALETTE[i % PALETTE.length]+"cc"),borderRadius:4,stack:"s"}
+  ];
+  if(hasCav) datasets.push({label:"Output saved (caveman)",data:rows.map(r=>r.output||0),backgroundColor:"#a371f7cc",borderRadius:4,stack:"s"});
   modelChart = new Chart($("#modelChart"), {
     type:"bar",
-    data:{ labels: rows.map(r=>modelLabel(r.model)), datasets:[
-      {label:"Tokens saved",data:rows.map(r=>r.saved||0),backgroundColor:rows.map((r,i)=>isUnknown(r.model)?"#8b949ecc":PALETTE[i % PALETTE.length]+"cc"),borderRadius:4}
-    ]},
+    data:{ labels: rows.map(r=>modelLabel(r.model)), datasets },
     options:{indexAxis:"y",responsive:true,
-      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{const r=rows[c.dataIndex]; return fmt(r.saved)+" saved · "+fmt(r.cmds)+" commands";}}}},
+      plugins:{legend:{display:hasCav,labels:{color:"#e6edf3",boxWidth:12,padding:10}},tooltip:{callbacks:{label:c=>c.dataset.label+": "+fmt(c.parsed.x)}}},
       scales:{
-        x:{ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
-        y:{ticks:{color:"#8b949e"},grid:{display:false}},
+        x:{stacked:true,ticks:{color:"#8b949e",callback:humanK},grid:{color:"#21262d"}},
+        y:{stacked:true,ticks:{color:"#8b949e"},grid:{display:false}},
       }}});
-  $("#modelTable").innerHTML = `<table><thead><tr><th>Model</th><th class="num">Saved</th><th class="num">Commands</th><th class="num">Savings %</th></tr></thead><tbody>${
-    rows.map(r=>`<tr><td class="${isUnknown(r.model)?'muted':''}">${escapeHtml(modelLabel(r.model))}</td><td class="num">${fmt(r.saved)}</td><td class="num">${fmt(r.cmds)}</td><td class="num">${(r.pct||0).toFixed(1)}%</td></tr>`).join("")
+  $("#modelTable").innerHTML = `<table><thead><tr><th>Model</th><th class="num">Input saved</th>${hasCav?'<th class="num">Output saved</th>':''}<th class="num">Commands</th><th class="num">Savings %</th></tr></thead><tbody>${
+    rows.map(r=>`<tr><td class="${isUnknown(r.model)?'muted':''}">${escapeHtml(modelLabel(r.model))}</td><td class="num">${fmt(r.saved)}</td>${hasCav?`<td class="num">${fmt(r.output)}</td>`:''}<td class="num">${fmt(r.cmds)}</td><td class="num">${(r.pct||0).toFixed(1)}%</td></tr>`).join("")
   }</tbody></table>`;
 }
 

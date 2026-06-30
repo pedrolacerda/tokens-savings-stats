@@ -29,9 +29,9 @@ function updateTray() {
       tray.setToolTip("rtk history.db not found yet");
       return;
     }
-    tray.setTitle(` ${Math.round(s.pct)}% · ${humanK(s.saved)}`);
+    tray.setTitle(` ${Math.round(s.pct)}% · ${humanK(s.totalSaved != null ? s.totalSaved : s.saved)}`);
     tray.setToolTip(
-      `${humanK(s.saved)} tokens saved (${s.pct.toFixed(1)}%) over ${s.commands} commands`
+      `${humanK(s.saved)} input (rtk) + ${humanK(s.outputSaved || 0)} output (caveman) = ${humanK(s.totalSaved != null ? s.totalSaved : s.saved)} tokens saved · ${s.pct.toFixed(1)}% over ${s.commands} commands`
     );
   } catch (e) {
     tray.setTitle(" rtk: err");
